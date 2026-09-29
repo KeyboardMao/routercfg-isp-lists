@@ -1,12 +1,13 @@
-# RouterOS 7.24.4 installer for the automatic disjoint ISP list updater.
+# RouterOS v7 stable/long-term (7.24.4 or newer) installer for the automatic
+# disjoint ISP list updater.
 #
 # BEFORE UPLOAD: replace the placeholder in both :local baseUrl assignments
 # HTTPS GitHub Pages base URL that contains manifest.json and slot-a/b.rsc.
 # Example: https://example.github.io/routeros-isp-lists
 #
-# The installer only creates one script and one DISABLED scheduler.  It does
-# not download lists or change mangle rules until the operator manually runs
-# the installed script.
+# The installer creates or replaces only the identity-matched managed script
+# and scheduler.  The resulting scheduler is DISABLED.  It does not download
+# lists or change mangle rules until the operator manually runs the script.
 
 {
     :log warning "routercfg ISP auto updater installer: start"
@@ -18,20 +19,58 @@
     :local unicomRuleComment "routercfg ISP affinity: ordinary Unicom-only destination"
     :local mobileRuleComment "routercfg ISP affinity: ordinary Mobile-only destination"
 
-    :if ([:pick [:tostr [/system resource get version]] 0 6] != "7.24.4") do={
-        :error "routercfg ISP auto updater: approved only for RouterOS 7.24.4"
+    # ROUTEROS_COMPATIBILITY_POLICY_BEGIN
+    :local routerVersion [:tostr [/system resource get version]]
+    :local minimumRouterVersion "7.24.4"
+    :local supportedMajor 7
+    :local channelStart [:find $routerVersion " "]
+    :if ([:typeof $channelStart] = "nil") do={
+        :error ("routercfg ISP updater: malformed RouterOS version: " . $routerVersion)
     }
+    :local numericVersion [:pick $routerVersion 0 $channelStart]
+    :local versionChannel [:pick $routerVersion ($channelStart + 1) [:len $routerVersion]]
+    :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+$") = false) do={
+        :error ("routercfg ISP updater: malformed RouterOS version: " . $routerVersion)
+    }
+    :if (($versionChannel != "(stable)") && ($versionChannel != "(long-term)")) do={
+        :error ("routercfg ISP updater: unsupported RouterOS channel: " . $versionChannel)
+    }
+    :local firstDot [:find $numericVersion "."]
+    :local afterMajor [:pick $numericVersion ($firstDot + 1) [:len $numericVersion]]
+    :local secondDot [:find $afterMajor "."]
+    :local routerMajor [:tonum [:pick $numericVersion 0 $firstDot]]
+    :local routerMinor [:tonum [:pick $afterMajor 0 $secondDot]]
+    :local routerPatch [:tonum [:pick $afterMajor ($secondDot + 1) [:len $afterMajor]]]
+    :if (($routerMajor != $supportedMajor) || ($routerMinor < 24) || (($routerMinor = 24) && ($routerPatch < 4))) do={
+        :error ("routercfg ISP updater: requires RouterOS v7 stable/long-term " . $minimumRouterVersion . " or newer; installed=" . $routerVersion)
+    }
+    # ROUTEROS_COMPATIBILITY_POLICY_END
     :if ([:pick $baseUrl 0 8] != "https://") do={
         :error "routercfg ISP auto updater: replace the base URL placeholder with an HTTPS Pages URL"
     }
     :if ([:pick $baseUrl ([:len $baseUrl] - 1) [:len $baseUrl]] = "/") do={
         :error "routercfg ISP auto updater: base URL must not end with a slash"
     }
-    :if ([/system script print count-only as-value where name=$updaterName] != 0) do={
-        :error "routercfg ISP auto updater: managed script already exists"
+    :if ([/system script job print count-only as-value where script=$updaterName] != 0) do={
+        :error "routercfg ISP auto updater: managed updater is currently running"
     }
-    :if ([/system scheduler print count-only as-value where name=$updaterName] != 0) do={
-        :error "routercfg ISP auto updater: managed scheduler already exists"
+    :if ([/system script print count-only as-value where name=$updaterName] > 1) do={
+        :error "routercfg ISP auto updater: duplicate managed scripts"
+    }
+    :if ([/system scheduler print count-only as-value where name=$updaterName] > 1) do={
+        :error "routercfg ISP auto updater: duplicate managed schedulers"
+    }
+    :if ([/system script print count-only as-value where name=$updaterName] = 1) do={
+        :local existingScript [/system script find where name=$updaterName]
+        :if ([:tostr [/system script get $existingScript comment]] != $updaterComment) do={
+            :error "routercfg ISP auto updater: existing script identity check failed"
+        }
+    }
+    :if ([/system scheduler print count-only as-value where name=$updaterName] = 1) do={
+        :local existingScheduler [/system scheduler find where name=$updaterName]
+        :if ([:tostr [/system scheduler get $existingScheduler comment]] != $schedulerComment) do={
+            :error "routercfg ISP auto updater: existing scheduler identity check failed"
+        }
     }
     :if ([/ip firewall mangle print count-only as-value where comment=$unicomRuleComment] != 1) do={
         :error "routercfg ISP auto updater: unique Unicom affinity rule not found"
@@ -61,13 +100,18 @@
         :error "routercfg ISP auto updater: Mobile affinity rule differs from the approved layout"
     }
 
+    # Reinstallation is the supported migration path for an older managed
+    # updater.  Only exact name+comment matches reached this point.
+    /system scheduler disable [find where name=$updaterName and comment=$schedulerComment]
+    /system scheduler remove [find where name=$updaterName and comment=$schedulerComment]
+    /system script remove [find where name=$updaterName and comment=$updaterComment]
+
     /system script add name=$updaterName policy=ftp,read,write,test,policy dont-require-permissions=no comment=$updaterComment source={
         :if ([/system script job print count-only as-value where script=[:jobname]] > 1) do={
             :error "ISP list updater: another instance is already running"
         }
 
         :local baseUrl "BASE_URL_REPLACE_ME"
-        :local expectedRouterVersion "7.24.4"
         :local schema "routercfg.isp-affinity-lists"
         :local updaterName "routercfg-isp-list-update"
         :local updaterComment "routercfg: automatic disjoint ISP address-list updater"
@@ -82,9 +126,32 @@
 
         :log info "ISP list updater: checking manifest"
 
-        :if ([:pick [:tostr [/system resource get version]] 0 6] != $expectedRouterVersion) do={
-            :error ("ISP list updater: RouterOS version is no longer approved; expected " . $expectedRouterVersion)
+        # ROUTEROS_COMPATIBILITY_POLICY_BEGIN
+        :local routerVersion [:tostr [/system resource get version]]
+        :local minimumRouterVersion "7.24.4"
+        :local supportedMajor 7
+        :local channelStart [:find $routerVersion " "]
+        :if ([:typeof $channelStart] = "nil") do={
+            :error ("routercfg ISP updater: malformed RouterOS version: " . $routerVersion)
         }
+        :local numericVersion [:pick $routerVersion 0 $channelStart]
+        :local versionChannel [:pick $routerVersion ($channelStart + 1) [:len $routerVersion]]
+        :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+$") = false) do={
+            :error ("routercfg ISP updater: malformed RouterOS version: " . $routerVersion)
+        }
+        :if (($versionChannel != "(stable)") && ($versionChannel != "(long-term)")) do={
+            :error ("routercfg ISP updater: unsupported RouterOS channel: " . $versionChannel)
+        }
+        :local firstDot [:find $numericVersion "."]
+        :local afterMajor [:pick $numericVersion ($firstDot + 1) [:len $numericVersion]]
+        :local secondDot [:find $afterMajor "."]
+        :local routerMajor [:tonum [:pick $numericVersion 0 $firstDot]]
+        :local routerMinor [:tonum [:pick $afterMajor 0 $secondDot]]
+        :local routerPatch [:tonum [:pick $afterMajor ($secondDot + 1) [:len $afterMajor]]]
+        :if (($routerMajor != $supportedMajor) || ($routerMinor < 24) || (($routerMinor = 24) && ($routerPatch < 4))) do={
+            :error ("routercfg ISP updater: requires RouterOS v7 stable/long-term " . $minimumRouterVersion . " or newer; installed=" . $routerVersion)
+        }
+        # ROUTEROS_COMPATIBILITY_POLICY_END
         :if ([:pick $baseUrl 0 8] != "https://") do={
             :error "ISP list updater: invalid HTTPS base URL"
         }
@@ -154,7 +221,8 @@
         :if ([:tonum ($manifest->"schema_version")] != 1) do={ :error "ISP list updater: manifest version mismatch" }
         :local version [:tostr ($manifest->"version")]
         :local marker [:tostr ($manifest->"marker")]
-        :if (([:len $version] != 16) || ($marker != ("routercfg-auto:" . $version))) do={
+        :if (([:len $version] != 16) || (($version ~ "^[0-9a-f]+$") = false) || \
+            ($marker != ("routercfg-auto:" . $version))) do={
             :error "ISP list updater: manifest release identity is invalid"
         }
         :local listMeta ($manifest->"lists")
@@ -162,6 +230,9 @@
         :local mobileMeta ($listMeta->"mobile")
         :local expectedUnicom [:tonum ($unicomMeta->"count")]
         :local expectedMobile [:tonum ($mobileMeta->"count")]
+        :if (([:typeof $expectedUnicom] != "num") || ([:typeof $expectedMobile] != "num")) do={
+            :error "ISP list updater: list counts are missing or non-numeric"
+        }
         :if (($expectedUnicom < 500) || ($expectedUnicom > 5000)) do={
             :error ("ISP list updater: unsafe Unicom count in manifest: " . $expectedUnicom)
         }
@@ -202,6 +273,9 @@
             :local remoteFile [:tostr ($slotMeta->"file")]
             :local expectedBytes [:tonum ($slotMeta->"bytes")]
             :if ($remoteFile != $expectedFile) do={ :error "ISP list updater: unexpected payload filename" }
+            :if ([:typeof $expectedBytes] != "num") do={
+                :error "ISP list updater: payload size is missing or non-numeric"
+            }
             :if (($expectedBytes < 100000) || ($expectedBytes > 2000000)) do={
                 :error ("ISP list updater: unsafe payload size in manifest: " . $expectedBytes)
             }

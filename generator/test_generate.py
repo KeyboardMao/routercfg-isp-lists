@@ -11,6 +11,19 @@ import generate
 
 
 class GeneratorTests(unittest.TestCase):
+    def test_release_version_identifies_effective_lists(self) -> None:
+        unicom = (ipaddress.IPv4Network("8.8.8.0/24"),)
+        mobile = (ipaddress.IPv4Network("11.0.0.0/24"),)
+        version = generate.build_release_version(unicom, mobile)
+        self.assertRegex(version, r"^[0-9a-f]{16}$")
+        self.assertEqual(version, generate.build_release_version(unicom, mobile))
+        self.assertNotEqual(
+            version,
+            generate.build_release_version(
+                (ipaddress.IPv4Network("8.8.8.0/25"),), mobile
+            ),
+        )
+
     def test_subtraction_removes_overlap_from_both_sides(self) -> None:
         unicom = [ipaddress.IPv4Network("8.8.8.0/24"), ipaddress.IPv4Network("9.9.9.0/24")]
         mobile = [ipaddress.IPv4Network("8.8.8.128/25"), ipaddress.IPv4Network("11.0.0.0/24")]
@@ -85,6 +98,13 @@ class GeneratorTests(unittest.TestCase):
             path = Path(directory) / "manifest.json"
             path.write_text(json.dumps({"schema": "wrong", "schema_version": 1}))
             with self.assertRaisesRegex(ValueError, "unexpected schema"):
+                generate.load_previous_manifest(path)
+
+    def test_manifest_loader_rejects_oversized_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(" " * (generate.MAX_MANIFEST_BYTES + 1))
+            with self.assertRaisesRegex(ValueError, "too large"):
                 generate.load_previous_manifest(path)
 
 

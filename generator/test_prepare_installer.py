@@ -21,6 +21,9 @@ class PrepareInstallerTests(unittest.TestCase):
             "https://example.test/lists/",
             "https://example.test/lists?token=secret",
             "https://example.test:8443/lists",
+            'https://example.test/li"sts',
+            "https://example.test/li$sts",
+            "https://example.test/li%20sts",
         ):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):

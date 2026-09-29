@@ -2,7 +2,7 @@
 
 适用环境：
 
-- RouterOS `7.24.4`；
+- RouterOS v7，版本不低于 `7.24.4`，版本标记为 `stable` 或 `long-term`；
 - 已部署本目录上级工程中的“联通独有 / 移动独有 / 未知默认联通”策略；
 - 下列两条 Mangle 规则各存在且仅存在一条：
   - `routercfg ISP affinity: ordinary Unicom-only destination`
@@ -37,7 +37,7 @@
 
 - 第一次安装和第一次切换；
 - 上游条目数单次变化超过 25% 时的审核；
-- RouterOS 升级后的兼容性复核；
+- RouterOS 跨主版本升级、切换到测试通道或低于最低版本时的兼容性复核；
 - 是否清理原始 2026-09-17 静态列表；
 - 是否回滚到静态列表。
 
@@ -54,7 +54,7 @@
 - 不直接自动导入第三方仓库提供的脚本；本方案只从自己的 Pages 地址下载生成结果；
 - GitHub Actions 依赖由 Dependabot 每周检查，升级通过 PR 审核完成。
 
-RouterOS 会检查下载文件的精确字节数、导入结果数量和版本标记。发布清单还记录 SHA-512，供人在 GitHub 或其他计算机上审计。RouterOS 7.24.4 不在脚本中读取整个大文件计算 SHA-512，因此路由器侧的传输信任边界是经过证书校验的 HTTPS Pages 站点。
+RouterOS 会检查下载文件的精确字节数、导入结果数量和版本标记。发布清单还记录 SHA-512，供人在 GitHub 或其他计算机上审计。更新器不在路由器中读取整个大文件计算 SHA-512，因此路由器侧的传输信任边界是经过证书校验的 HTTPS Pages 站点。
 
 ## 3. 文件说明
 
@@ -62,7 +62,7 @@ RouterOS 会检查下载文件的精确字节数、导入结果数量和版本�
 .github/workflows/publish.yml       GitHub Actions 构建和 Pages 发布
 .github/dependabot.yml              Actions 依赖更新检查
 generator/generate.py               无第三方 Python 依赖的生成器
-generator/test_generate.py          集合运算和安全门测试
+generator/test_*.py                 集合运算、URL、版本策略和安全门测试
 generator/validate_bundle.py        模板和发布文件静态检查
 generator/prepare_installer.py       安全生成含 Pages URL 的安装文件
 routeros/install-template.rsc       RouterOS 安装模板
@@ -123,6 +123,9 @@ https://<用户名>.github.io/<仓库名>/slot-b.rsc
 - 联通、移动生成条目数；
 - 两个槽位文件名、字节数和 SHA-512；
 - 原始数据来源和 SHA-256。
+- RouterOS 最低版本、支持的主版本和发布通道。
+
+发布版本号由最终生效的“联通独有”和“移动独有”CIDR 内容生成。上游文件只改变注释或顺序时不会无意义重建；生成逻辑造成有效列表变化时，即使条目数相同，也会得到新版本并触发 RouterOS 更新。
 
 ### 4.3 启用相邻版本变化检查
 
@@ -141,7 +144,7 @@ Value: https://<用户名>.github.io/<仓库名>
 
 末尾不要带 `/`。
 
-以后工作流会读取当前线上 `manifest.json`。如果任一列表的条目数或覆盖 IPv4 地址总量相对上一版变化超过 25%，定时发布失败并保留线上旧版本。确认上游变化真实合理后，手动运行工作流并将 `allow_large_change` 设为 `true`。
+以后工作流会读取当前线上 `manifest.json`。如果清单无法获取、超过 4 KiB 或格式无效，构建会安全失败，不会绕过相邻版本检查。如果任一列表的条目数或覆盖 IPv4 地址总量相对上一版变化超过 25%，定时发布失败并保留线上旧版本。确认上游变化真实合理后，手动运行工作流并将 `allow_large_change` 设为 `true`。
 
 ## 5. 发布端本地验证
 
@@ -210,7 +213,7 @@ python .\generator\generate.py `
 
 进入下一步前必须满足：
 
-- RouterOS 显示 `7.24.4`；
+- RouterOS 为 v7，版本不低于 `7.24.4`，并显示 `(stable)` 或 `(long-term)`；
 - 静态联通列表为 `1520` 项；
 - 静态移动列表为 `948` 项；
 - 两条 Mangle 规则各一条、均启用；
@@ -224,7 +227,7 @@ python .\generator\generate.py `
 
 ## 7. 生成 RouterOS 安装文件
 
-不要直接上传 `install-template.rsc`。使用随附生成器把 Pages 基础地址写入安装文件。URL 必须是无账号、密码、查询参数和尾部 `/` 的标准 HTTPS 地址。
+不要直接上传 `install-template.rsc`。使用随附生成器把 Pages 基础地址写入安装文件。URL 必须是无账号、密码、查询参数和尾部 `/` 的标准 HTTPS 地址。生成的 `routeros/install.rsc` 已加入 `.gitignore`，不会误提交包含实际站点地址的部署副本。
 
 跨平台推荐命令：
 
@@ -281,7 +284,7 @@ sed "s|BASE_URL_REPLACE_ME|${base_url}|g" \
 /system scheduler print detail where name="routercfg-isp-list-update"
 ```
 
-此时必须满足：
+首次安装时必须满足：
 
 - 更新脚本只有一个；
 - Scheduler 只有一个；
@@ -290,6 +293,8 @@ sed "s|BASE_URL_REPLACE_ME|${base_url}|g" \
 - 更新脚本和 Scheduler 的策略均包含 `ftp,read,write,test,policy`，其中 `ftp` 用于下载、读取和清理 Files 中的临时文件；
 - 当前 Mangle 仍指向 2026-09-17 静态列表；
 - 尚未出现 `routercfg-isp-*-auto-a/b` 列表。
+
+安装器也用于升级旧版受管更新器：它只接受名称和注释均精确匹配的现有脚本与 Scheduler，确认更新任务未运行后才替换它们；替换后的 Scheduler 一律保持禁用，必须重新完成人工运行和业务验收后再启用。名称相同但注释不同的对象会使安装停止。
 
 确认后按 `Ctrl+X` 提交 Safe Mode。若任何检查失败，按 `Ctrl+D` 放弃并重新登录检查。
 
@@ -442,7 +447,7 @@ GitHub 侧检查：
 | 两条 Mangle 缺失或重复 | 停止 | 恢复经审核的现网规则 |
 | 管理员在更新中修改规则 | 停止，活动槽不切换 | 检查变更来源 |
 | 第二条规则切换失败 | 尝试把两条规则恢复到旧槽 | 立即检查日志和两条规则 |
-| RouterOS 不再是7.24.4 | 停止，现有列表继续工作 | 完成新版兼容测试后更新脚本 |
+| RouterOS v7 低于7.24.4、不是stable/long-term，或主版本不是v7 | 在下载和导入前停止，现有列表继续工作 | 恢复支持的版本/通道；跨主版本先完成兼容审查 |
 
 不要通过删除检查条件来“修复”失败；错误表示现网假设或发布数据已经变化。
 
@@ -498,16 +503,24 @@ GitHub 侧检查：
 
 ## 15. RouterOS 升级
 
-更新器故意锁定 `7.24.4`。升级 RouterOS 前：
+更新器读取 `/system resource get version` 的完整值并逐段比较版本号。支持范围为：
 
-1. 禁用 `routercfg-isp-list-update` Scheduler；
-2. 导出配置并保存二进制备份；
-3. 在目标版本验证 Fetch、JSON反序列化、Import、Mangle 和文件属性；
-4. 修改安装模板和已安装脚本中的版本检查；
-5. 手工运行一次，完成第 9～10 节验收；
-6. 再启用 Scheduler。
+- 主版本必须是 v7；
+- 版本必须不低于 `7.24.4`；
+- 通道标记必须是 `(stable)` 或 `(long-term)`。
 
-版本检查失败不会影响已经活动的 Address List 和既有连接。
+因此，从 `7.24.4` 升级到后续 v7 稳定版或长期维护版后，已安装的新版更新器会继续按计划自动更新列表，不需要每次修改脚本。版本比较按数字段进行，例如 `7.24.10` 高于 `7.24.4`，不会发生字符串比较错误。
+
+升级 RouterOS 时仍应：
+
+1. 导出配置并保存二进制备份；
+2. 升级并重启后检查 `/system resource print`；
+3. 检查 Scheduler 最近一次运行状态和 `ISP list updater` 日志；
+4. 手工运行一次更新器并执行第 9～10 节验收。
+
+`testing`、`development`、预发布格式、v6、未来 v8 或无法解析的版本会在 Fetch 和 Import 之前安全停止，当前活动 Address List、Mangle 指向和既有连接保持不变。未来 v8 需要先核对 Fetch、JSON 反序列化、Import、Mangle、脚本权限和文件属性，再发布明确支持 v8 的更新器；不能在未知主版本上自动放行。
+
+如果路由器中已经安装了旧的“只允许 7.24.4”脚本，先使用本项目最新模板重新生成 `install.rsc`，按第 8 节在 Safe Mode 中导入。安装器会验证并替换旧的受管脚本和 Scheduler，且将 Scheduler 保持禁用。随后按第 9～10 节手工验收，再按第 11 节启用 Scheduler。这是一次性迁移；迁移完成后，后续受支持的 v7 升级无需重复安装。
 
 ## 16. 上游与文档
 

@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/publish.yml"
       - "generator/**"
+      - "routeros/**"
+      - "README.md"
   schedule:
     # 00:00 Asia/Shanghai (16:00 UTC on the previous date).
     - cron: "0 16 * * *"
@@ -52,9 +54,9 @@ jobs:
         run: |
           if [ -n "${PAGES_BASE_URL:-}" ]; then
             curl --fail --silent --show-error --location \
-              --max-time 30 --retry 2 \
+              --max-time 30 --retry 2 --max-filesize 4096 \
               "${PAGES_BASE_URL%/}/manifest.json" \
-              --output /tmp/previous-manifest.json || true
+              --output /tmp/previous-manifest.json
           fi
 
       - name: Generate validated A/B payloads

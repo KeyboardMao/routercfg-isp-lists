@@ -13,6 +13,24 @@
     :if ([/system script job print count-only as-value where script=$updaterName] != 0) do={
         :error "ISP list rollback: updater is currently running"
     }
+    :if ([/system script print count-only as-value where name=$updaterName] > 1) do={
+        :error "ISP list rollback: duplicate managed scripts"
+    }
+    :if ([/system scheduler print count-only as-value where name=$updaterName] > 1) do={
+        :error "ISP list rollback: duplicate managed schedulers"
+    }
+    :if ([/system script print count-only as-value where name=$updaterName] = 1) do={
+        :local managedScript [/system script find where name=$updaterName]
+        :if ([:tostr [/system script get $managedScript comment]] != $updaterComment) do={
+            :error "ISP list rollback: script identity check failed"
+        }
+    }
+    :if ([/system scheduler print count-only as-value where name=$updaterName] = 1) do={
+        :local managedScheduler [/system scheduler find where name=$updaterName]
+        :if ([:tostr [/system scheduler get $managedScheduler comment]] != $schedulerComment) do={
+            :error "ISP list rollback: scheduler identity check failed"
+        }
+    }
     :if ([/ip firewall address-list print count-only as-value where list=$legacyUnicom] != 1520) do={
         :error "ISP list rollback: retained Unicom legacy list is missing or incomplete"
     }
@@ -26,16 +44,22 @@
         :error "ISP list rollback: unique Mobile affinity rule not found"
     }
 
-    :if ([/system scheduler print count-only as-value where name=$updaterName] = 1) do={
-        :local scheduler [/system scheduler find where name=$updaterName]
-        :if ([:tostr [/system scheduler get $scheduler comment]] != $schedulerComment) do={
-            :error "ISP list rollback: scheduler identity check failed"
-        }
-        /system scheduler disable $scheduler
-    }
-
     :local unicomRule [/ip firewall mangle find where comment=$unicomRuleComment]
     :local mobileRule [/ip firewall mangle find where comment=$mobileRuleComment]
+    :if (([:tostr [/ip firewall mangle get $unicomRule chain]] != "prerouting") || \
+        ([:tostr [/ip firewall mangle get $unicomRule action]] != "mark-connection") || \
+        ([:tostr [/ip firewall mangle get $unicomRule new-connection-mark]] != "conn_unicom") || \
+        ([:tostr [/ip firewall mangle get $unicomRule disabled]] != "false")) do={
+        :error "ISP list rollback: Unicom affinity rule identity changed"
+    }
+    :if (([:tostr [/ip firewall mangle get $mobileRule chain]] != "prerouting") || \
+        ([:tostr [/ip firewall mangle get $mobileRule action]] != "mark-connection") || \
+        ([:tostr [/ip firewall mangle get $mobileRule new-connection-mark]] != "conn_mobile") || \
+        ([:tostr [/ip firewall mangle get $mobileRule disabled]] != "false")) do={
+        :error "ISP list rollback: Mobile affinity rule identity changed"
+    }
+    /system scheduler disable [find where name=$updaterName and comment=$schedulerComment]
+
     :local priorUnicom [:tostr [/ip firewall mangle get $unicomRule dst-address-list]]
     :local priorMobile [:tostr [/ip firewall mangle get $mobileRule dst-address-list]]
     :onerror switchError in={
@@ -56,15 +80,15 @@
     :if ([/system scheduler print count-only as-value where name=$updaterName] = 1) do={
         /system scheduler remove [find where name=$updaterName and comment=$schedulerComment]
     }
-    :if ([/system script print count-only as-value where name=$updaterName] = 1) do={
-        :local script [/system script find where name=$updaterName]
-        :if ([:tostr [/system script get $script comment]] != $updaterComment) do={
-            :error "ISP list rollback: script identity check failed after route rollback"
-        }
-        /system script remove $script
-    }
+    /system script remove [find where name=$updaterName and comment=$updaterComment]
     /file remove [find where name="routercfg-isp-auto-a.rsc"]
     /file remove [find where name="routercfg-isp-auto-b.rsc"]
+    :if ([/system script print count-only as-value where name=$updaterName] != 0) do={
+        :error "ISP list rollback: managed script remains"
+    }
+    :if ([/system scheduler print count-only as-value where name=$updaterName] != 0) do={
+        :error "ISP list rollback: managed scheduler remains"
+    }
     :log warning "ISP list automation rolled back to retained 2026-09-17 static lists"
     :put "Rollback complete: static 2026-09-17 lists are active; automatic updater removed."
 }

@@ -50,6 +50,7 @@ OUTPUT_ADDRESS_BOUNDS = {
     "mobile": (10_000_000, 150_000_000),
 }
 MAX_OUTPUT_BYTES = 2_000_000
+MAX_MANIFEST_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,21 @@ def total_addresses(networks: Iterable[ipaddress.IPv4Network]) -> int:
     return sum(network.num_addresses for network in networks)
 
 
+def build_release_version(
+    unicom: tuple[ipaddress.IPv4Network, ...],
+    mobile: tuple[ipaddress.IPv4Network, ...],
+) -> str:
+    """Identify the effective published lists, independent of source formatting."""
+    digest = hashlib.sha256()
+    digest.update(f"{SCHEMA}\n{SCHEMA_VERSION}\nunicom\n".encode("ascii"))
+    for network in unicom:
+        digest.update(f"{network}\n".encode("ascii"))
+    digest.update(b"mobile\n")
+    for network in mobile:
+        digest.update(f"{network}\n".encode("ascii"))
+    return digest.hexdigest()[:16]
+
+
 def validate_output(name: str, networks: tuple[ipaddress.IPv4Network, ...]) -> None:
     low, high = OUTPUT_COUNT_BOUNDS[name]
     if not low <= len(networks) <= high:
@@ -225,6 +241,8 @@ def validate_output(name: str, networks: tuple[ipaddress.IPv4Network, ...]) -> N
 def load_previous_manifest(path: Path | None) -> dict | None:
     if path is None or not path.exists() or path.stat().st_size == 0:
         return None
+    if path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise ValueError(f"previous manifest is too large: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema") != SCHEMA or data.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"previous manifest has an unexpected schema: {path}")
@@ -357,10 +375,7 @@ def build(args: argparse.Namespace) -> dict:
         previous, metrics, args.max_count_change, args.allow_large_change
     )
 
-    version_material = (
-        f"unicom={unicom_source.sha256}\nmobile={mobile_source.sha256}\n"
-    ).encode("ascii")
-    version = hashlib.sha256(version_material).hexdigest()[:16]
+    version = build_release_version(unicom_only, mobile_only)
     marker = f"routercfg-auto:{version}"
 
     output = args.output
@@ -415,7 +430,9 @@ def build(args: argparse.Namespace) -> dict:
         },
         "slots": slot_metadata,
         "routeros": {
-            "tested_version": "7.24.4",
+            "minimum_version": "7.24.4",
+            "supported_major": 7,
+            "supported_channels": ["stable", "long-term"],
             "unicom_rule_comment": "routercfg ISP affinity: ordinary Unicom-only destination",
             "mobile_rule_comment": "routercfg ISP affinity: ordinary Mobile-only destination",
         },
@@ -423,7 +440,7 @@ def build(args: argparse.Namespace) -> dict:
     manifest_bytes = (
         json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
     ).encode("ascii")
-    if len(manifest_bytes) > 4096:
+    if len(manifest_bytes) > MAX_MANIFEST_BYTES:
         raise ValueError(f"manifest exceeds RouterOS safe variable size: {len(manifest_bytes)}")
     (output / "manifest.json").write_bytes(manifest_bytes)
     write_index(output, manifest)

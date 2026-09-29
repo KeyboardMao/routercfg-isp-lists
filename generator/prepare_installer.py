@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,6 +13,9 @@ PLACEHOLDER = "BASE_URL_REPLACE_ME"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEMPLATE = ROOT / "routeros" / "install-template.rsc"
 DEFAULT_OUTPUT = ROOT / "routeros" / "install.rsc"
+SAFE_BASE_URL_RE = re.compile(
+    r"https://[A-Za-z0-9.-]+(?::443)?(?:/[A-Za-z0-9._~-]+)*"
+)
 
 
 def validate_base_url(value: str) -> str:
@@ -28,6 +32,8 @@ def validate_base_url(value: str) -> str:
         raise ValueError("base URL must not contain a query or fragment")
     if parsed.port not in (None, 443):
         raise ValueError("base URL must use the default HTTPS port")
+    if SAFE_BASE_URL_RE.fullmatch(value) is None:
+        raise ValueError("base URL contains characters unsafe for a RouterOS string")
     return value
 
 

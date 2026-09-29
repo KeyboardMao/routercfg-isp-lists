@@ -1,0 +1,102 @@
+name: Build and publish RouterOS ISP lists
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish.yml"
+      - "generator/**"
+  schedule:
+    # 00:00 Asia/Shanghai (16:00 UTC on the previous date).
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      allow_large_change:
+        description: "Publish after manually reviewing a source count change above 25%"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: routeros-isp-list-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Run generator tests
+        working-directory: generator
+        run: python -m unittest -v
+
+      - name: Validate deployment templates
+        run: python generator/validate_bundle.py
+
+      - name: Download current production manifest when configured
+        env:
+          PAGES_BASE_URL: ${{ vars.PAGES_BASE_URL }}
+        run: |
+          if [ -n "${PAGES_BASE_URL:-}" ]; then
+            curl --fail --silent --show-error --location \
+              --max-time 30 --retry 2 \
+              "${PAGES_BASE_URL%/}/manifest.json" \
+              --output /tmp/previous-manifest.json || true
+          fi
+
+      - name: Generate validated A/B payloads
+        env:
+          ALLOW_LARGE_CHANGE: ${{ inputs.allow_large_change || 'false' }}
+        run: |
+          extra_args=()
+          if [ -f /tmp/previous-manifest.json ]; then
+            extra_args+=(--previous-manifest /tmp/previous-manifest.json)
+          fi
+          if [ "${ALLOW_LARGE_CHANGE}" = "true" ]; then
+            extra_args+=(--allow-large-change)
+          fi
+          python generator/generate.py --output public "${extra_args[@]}"
+
+      - name: Inspect generated files
+        run: |
+          python -m json.tool public/manifest.json >/dev/null
+          python generator/validate_bundle.py --public public
+          test -s public/slot-a.rsc
+          test -s public/slot-b.rsc
+          test -s public/index.html
+          cmp -s \
+            <(sed 's/auto-a/auto-SLOT/g; s/slot=A/slot=SLOT/g; s/payload A/payload SLOT/g' public/slot-a.rsc) \
+            <(sed 's/auto-b/auto-SLOT/g; s/slot=B/slot=SLOT/g; s/payload B/payload SLOT/g' public/slot-b.rsc)
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

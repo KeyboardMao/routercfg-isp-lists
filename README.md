@@ -1,0 +1,519 @@
+# RouterOS 运营商 Address List 全自动更新部署指南
+
+适用环境：
+
+- RouterOS `7.24.4`；
+- 已部署本目录上级工程中的“联通独有 / 移动独有 / 未知默认联通”策略；
+- 下列两条 Mangle 规则各存在且仅存在一条：
+  - `routercfg ISP affinity: ordinary Unicom-only destination`
+  - `routercfg ISP affinity: ordinary Mobile-only destination`
+- 路由表 `to_unicom`、`to_mobile` 各存在一张；
+- 当前静态列表为：
+  - `routercfg-isp-unicom-only-20260917`，预期 1,520 项；
+  - `routercfg-isp-mobile-only-20260917`，预期 948 项。
+
+这套方案不会修改 NAT、Filter、队列、PCC、VPS 配对、PT 专用规则或未知目标的联通兜底规则。自动更新只维护两组专用 A/B Address List，并只切换上述两条 Mangle 规则的 `dst-address-list`。
+
+## 1. 方案边界
+
+### 1.1 自动完成的工作
+
+1. GitHub Actions 每天读取上游联通、移动 IPv4 列表；
+2. 校验每一行必须是严格、可路由的公网 IPv4 CIDR；
+3. 归并重复和相邻范围；
+4. 从联通和移动双方同时剔除全部重叠地址；
+5. 校验生成结果完全互斥；
+6. 对原始条目数、结果条目数和相邻版本变化幅度设置熔断条件；
+7. 生成 RouterOS A/B 两个槽位的 `.rsc` 数据文件和小于 4 KiB 的清单；
+8. 通过 GitHub Pages 发布；
+9. RouterOS 每天只下载小清单；版本变化时才下载大数据文件；
+10. 将数据导入非活动槽，校验通过后切换两条策略规则；
+11. 下载、导入、数量、规则身份或切换失败时保留原活动槽；
+12. 记录成功、无更新和错误日志。
+
+默认时序为北京时间每天 `00:00` 启动 GitHub Actions，RouterOS 在 `00:10` 检查发布结果。十分钟间隔用于避免 RouterOS 在 Pages 新版本尚未发布完成时读取上一版；两端均按每日周期运行。
+
+### 1.2 有意保留的人工控制
+
+- 第一次安装和第一次切换；
+- 上游条目数单次变化超过 25% 时的审核；
+- RouterOS 升级后的兼容性复核；
+- 是否清理原始 2026-09-17 静态列表；
+- 是否回滚到静态列表。
+
+## 2. 安全模型
+
+自动执行远程 `.rsc` 等同于信任发布该文件的仓库和 GitHub Pages。应遵守以下要求：
+
+- 使用自己控制的专用仓库；列表本身不含秘密，建议使用公开仓库；
+- 为 GitHub 账号启用双重验证；
+- 保护 `main` 分支，要求 Pull Request 和 Actions 成功后才能合并；
+- 不在生成文件、工作流或 RouterOS 脚本中放入令牌、PPPoE 密码或其他凭据；
+- RouterOS Fetch 必须使用 HTTPS 和 `check-certificate=yes-without-crl`；
+- 路由器时间和 DNS 必须正确，否则证书验证会失败；
+- 不直接自动导入第三方仓库提供的脚本；本方案只从自己的 Pages 地址下载生成结果；
+- GitHub Actions 依赖由 Dependabot 每周检查，升级通过 PR 审核完成。
+
+RouterOS 会检查下载文件的精确字节数、导入结果数量和版本标记。发布清单还记录 SHA-512，供人在 GitHub 或其他计算机上审计。RouterOS 7.24.4 不在脚本中读取整个大文件计算 SHA-512，因此路由器侧的传输信任边界是经过证书校验的 HTTPS Pages 站点。
+
+## 3. 文件说明
+
+```text
+.github/workflows/publish.yml       GitHub Actions 构建和 Pages 发布
+.github/dependabot.yml              Actions 依赖更新检查
+generator/generate.py               无第三方 Python 依赖的生成器
+generator/test_generate.py          集合运算和安全门测试
+generator/validate_bundle.py        模板和发布文件静态检查
+generator/prepare_installer.py       安全生成含 Pages URL 的安装文件
+routeros/install-template.rsc       RouterOS 安装模板
+routeros/remove-automation.rsc      只移除自动化，保留当前列表和选路
+routeros/rollback-to-legacy-20260917.rsc
+                                    切回静态列表并移除自动化
+```
+
+## 4. 建立 GitHub 发布仓库
+
+### 4.1 创建仓库
+
+在 GitHub 创建一个专用仓库，例如：
+
+```text
+routeros-isp-lists
+```
+
+不要把完整 RouterOS 导出、密码、Token 或证书私钥放入该仓库。
+
+把本目录中的内容作为新仓库根目录上传。仓库根目录应直接包含 `.github`、`generator` 和 `routeros`，不要额外再套一层 `isp-list-auto-update`。
+
+### 4.2 启用 GitHub Pages
+
+进入仓库：
+
+```text
+Settings → Pages → Build and deployment → Source → GitHub Actions
+```
+
+随后进入：
+
+```text
+Actions → Build and publish RouterOS ISP lists → Run workflow
+```
+
+第一次运行保持 `allow_large_change=false`。
+
+成功后 Pages 地址通常为：
+
+```text
+https://<GitHub用户名>.github.io/<仓库名>
+```
+
+打开以下三个地址，必须都能访问：
+
+```text
+https://<用户名>.github.io/<仓库名>/manifest.json
+https://<用户名>.github.io/<仓库名>/slot-a.rsc
+https://<用户名>.github.io/<仓库名>/slot-b.rsc
+```
+
+`manifest.json` 中应包含：
+
+- `schema` 为 `routercfg.isp-affinity-lists`；
+- `schema_version` 为 `1`；
+- 16 位十六进制 `version`；
+- 联通、移动生成条目数；
+- 两个槽位文件名、字节数和 SHA-512；
+- 原始数据来源和 SHA-256。
+
+### 4.3 启用相邻版本变化检查
+
+第一次 Pages 发布成功后，进入：
+
+```text
+Settings → Secrets and variables → Actions → Variables → New repository variable
+```
+
+创建：
+
+```text
+Name:  PAGES_BASE_URL
+Value: https://<用户名>.github.io/<仓库名>
+```
+
+末尾不要带 `/`。
+
+以后工作流会读取当前线上 `manifest.json`。如果任一列表的条目数或覆盖 IPv4 地址总量相对上一版变化超过 25%，定时发布失败并保留线上旧版本。确认上游变化真实合理后，手动运行工作流并将 `allow_large_change` 设为 `true`。
+
+## 5. 发布端本地验证
+
+在提交到 GitHub 前，可先本地运行。生成器仅使用 Python 标准库。
+
+Linux/macOS：
+
+```bash
+cd isp-list-auto-update/generator
+python3 -m unittest -v
+cd ..
+python3 generator/generate.py --output public
+python3 -m json.tool public/manifest.json
+```
+
+Windows PowerShell：
+
+```powershell
+Set-Location .\isp-list-auto-update\generator
+python -m unittest -v
+Set-Location ..
+python .\generator\generate.py --output .\public
+python -m json.tool .\public\manifest.json
+```
+
+生成器默认使用上游项目提供的 GitHub Pages 镜像：
+
+```text
+https://gaoyifan.github.io/china-operator-ip/unicom.txt
+https://gaoyifan.github.io/china-operator-ip/cmcc.txt
+```
+
+如需用固定文件复核：
+
+```powershell
+python .\generator\generate.py `
+  --unicom-file ..\unicom-source-20260917.txt `
+  --mobile-file ..\cmcc-source-20260917.txt `
+  --output .\public-local
+```
+
+## 6. RouterOS 变更前检查
+
+通过可靠的 LAN WinBox/终端连接执行。先保存并下载备份：
+
+```routeros
+/export terse file=before-isp-list-auto-redacted
+/system backup save name=before-isp-list-auto
+/system resource print
+/system clock print
+/ip dns print
+```
+
+确认版本、现有列表、规则和路由表：
+
+```routeros
+/system resource print
+/ip firewall address-list print count-only as-value where list="routercfg-isp-unicom-only-20260917"
+/ip firewall address-list print count-only as-value where list="routercfg-isp-mobile-only-20260917"
+/ip firewall mangle print detail without-paging where comment="routercfg ISP affinity: ordinary Unicom-only destination"
+/ip firewall mangle print detail without-paging where comment="routercfg ISP affinity: ordinary Mobile-only destination"
+/routing table print detail where name="to_unicom"
+/routing table print detail where name="to_mobile"
+/system history print count-only where floating-undo=yes
+```
+
+进入下一步前必须满足：
+
+- RouterOS 显示 `7.24.4`；
+- 静态联通列表为 `1520` 项；
+- 静态移动列表为 `948` 项；
+- 两条 Mangle 规则各一条、均启用；
+- 联通规则是 `mark-connection → conn_unicom`；
+- 移动规则是 `mark-connection → conn_mobile`；
+- 两张策略路由表各一张；
+- `floating-undo` 为 `0`；
+- 路由器时间正确，DNS 可解析 GitHub Pages 域名。
+
+如果现网已改变，不要修改安装脚本绕过检查；应重新获取脱敏导出并重新审查规则身份。
+
+## 7. 生成 RouterOS 安装文件
+
+不要直接上传 `install-template.rsc`。使用随附生成器把 Pages 基础地址写入安装文件。URL 必须是无账号、密码、查询参数和尾部 `/` 的标准 HTTPS 地址。
+
+跨平台推荐命令：
+
+```text
+python generator/prepare_installer.py \
+  --base-url https://<用户名>.github.io/<仓库名> \
+  --output routeros/install.rsc
+```
+
+Windows PowerShell 可写成一行：
+
+```powershell
+python .\generator\prepare_installer.py --base-url https://<用户名>.github.io/<仓库名> --output .\routeros\install.rsc
+```
+
+以下为没有 Python 时的手工替代方法。
+
+PowerShell 示例：
+
+```powershell
+$baseUrl = 'https://<用户名>.github.io/<仓库名>'
+$template = Get-Content -Raw .\routeros\install-template.rsc
+$prepared = $template.Replace('BASE_URL_REPLACE_ME', $baseUrl)
+if ($prepared.Contains('BASE_URL_REPLACE_ME')) { throw 'URL placeholder remains' }
+Set-Content -LiteralPath .\routeros\install.rsc -Value $prepared -Encoding ascii
+```
+
+Linux/macOS 示例：
+
+```bash
+base_url='https://<用户名>.github.io/<仓库名>'
+sed "s|BASE_URL_REPLACE_ME|${base_url}|g" \
+  routeros/install-template.rsc > routeros/install.rsc
+! grep -q 'BASE_URL_REPLACE_ME' routeros/install.rsc
+```
+
+检查生成文件中两个 `:local baseUrl` 值完全相同。不要在 URL 中放查询参数、令牌或用户密码。
+
+## 8. 安装 RouterOS 更新器
+
+将生成的 `routeros/install.rsc` 上传到 RouterOS Files 根目录。
+
+先做语法检查：
+
+```routeros
+/import file-name=install.rsc verbose=yes dry-run
+```
+
+确认无错误后，在同一 LAN 终端按 `Ctrl+X` 进入 Safe Mode，再执行：
+
+```routeros
+/import file-name=install.rsc verbose=yes
+/system script print detail where name="routercfg-isp-list-update"
+/system scheduler print detail where name="routercfg-isp-list-update"
+```
+
+此时必须满足：
+
+- 更新脚本只有一个；
+- Scheduler 只有一个；
+- Scheduler 为 `disabled=yes`；
+- 间隔为一天；
+- 更新脚本和 Scheduler 的策略均包含 `ftp,read,write,test,policy`，其中 `ftp` 用于下载、读取和清理 Files 中的临时文件；
+- 当前 Mangle 仍指向 2026-09-17 静态列表；
+- 尚未出现 `routercfg-isp-*-auto-a/b` 列表。
+
+确认后按 `Ctrl+X` 提交 Safe Mode。若任何检查失败，按 `Ctrl+D` 放弃并重新登录检查。
+
+## 9. 第一次手工更新和切换
+
+第一次运行会创建约数千条 Address List，不能放在 RouterOS Safe Mode 中执行；Safe Mode 的历史动作容量不适合这种批量导入。A/B 设计保证生成失败时活动静态列表不被删除。
+
+在低峰期、可靠 LAN 管理连接上执行：
+
+```routeros
+/system script run routercfg-isp-list-update
+```
+
+完成后检查日志：
+
+```routeros
+/log print without-paging where message~"ISP list updater"
+```
+
+第一次成功应出现类似：
+
+```text
+ISP list updater: switched from legacy to a; version=...; Unicom=...; Mobile=...
+```
+
+检查规则实际指向同一个槽：
+
+```routeros
+/ip firewall mangle print detail without-paging where comment="routercfg ISP affinity: ordinary Unicom-only destination"
+/ip firewall mangle print detail without-paging where comment="routercfg ISP affinity: ordinary Mobile-only destination"
+```
+
+第一次通常应分别指向：
+
+```text
+routercfg-isp-unicom-auto-a
+routercfg-isp-mobile-auto-a
+```
+
+检查四个自动槽位的数量：
+
+```routeros
+/ip firewall address-list print count-only as-value where list="routercfg-isp-unicom-auto-a"
+/ip firewall address-list print count-only as-value where list="routercfg-isp-mobile-auto-a"
+/ip firewall address-list print count-only as-value where list="routercfg-isp-unicom-auto-b"
+/ip firewall address-list print count-only as-value where list="routercfg-isp-mobile-auto-b"
+```
+
+活动槽数量必须与 Pages 上 `manifest.json` 完全一致；另一个槽第一次运行时应为空。
+
+立即再运行一次验证幂等性：
+
+```routeros
+/system script run routercfg-isp-list-update
+/log print without-paging where message~"ISP list updater"
+```
+
+应记录：
+
+```text
+ISP list updater: already current
+```
+
+Address List 数量和 Mangle 指向不应变化。
+
+## 10. 业务验收
+
+不要清空整个 Connection Tracking 表。现有连接继续保留原 `connection-mark`，新连接才使用新列表。
+
+重置三条本方案 Mangle 规则计数：
+
+```routeros
+/ip firewall mangle reset-counters [find where comment~"^routercfg ISP affinity: ordinary"]
+```
+
+从一台非 `192.168.99.4`、非 OpenWrt DNS 固定出口主机分别发起新请求：
+
+```powershell
+nslookup www.amap.com 202.99.96.68
+nslookup www.amap.com 211.137.160.5
+```
+
+再访问一个未分类目标。然后检查：
+
+```routeros
+/ip firewall mangle print stats without-paging where comment~"^routercfg ISP affinity: ordinary"
+/ip firewall connection print detail without-paging where connection-mark="conn_unicom"
+/ip firewall connection print detail without-paging where connection-mark="conn_mobile"
+/ip firewall nat print stats without-paging where dynamic=yes
+/system resource print
+```
+
+验收项目：
+
+- 联通、移动、未知三条分类规则均能在对应测试中增加计数；
+- 新连接的 `connection-mark` 与目标分类一致；
+- VPS A/B、PT、Tracker 和 DNS pin 行为未改变；
+- 常用网站、管理连接和 DNS 正常；
+- CPU、内存没有持续异常；
+- 没有新增重复脚本、Scheduler 或临时 `.rsc` 文件。
+
+## 11. 启用定时更新
+
+完成第一次运行和业务验收后启用：
+
+```routeros
+/system scheduler enable [find where name="routercfg-isp-list-update"]
+/system scheduler print detail where name="routercfg-isp-list-update"
+```
+
+确认：
+
+```text
+disabled=no
+interval=1d
+start-time=00:10:00
+```
+
+每天只获取小清单。上游数据未变化时不会下载或重建大列表；版本变化时导入非活动槽并在末尾切换。
+
+## 12. 日常监控
+
+每周检查一次：
+
+```routeros
+/system scheduler print detail where name="routercfg-isp-list-update"
+/system script job print where script="routercfg-isp-list-update"
+/log print without-paging where message~"ISP list updater"
+/ip firewall mangle print detail without-paging where comment~"^routercfg ISP affinity: ordinary (Unicom|Mobile)"
+/system resource print
+```
+
+GitHub 侧检查：
+
+- 最近一次定时工作流成功；
+- Pages 的 `manifest.json` 可以访问；
+- 没有待处理的 Dependabot 安全更新；
+- 没有因为 25% 变化门限而失败的工作流；
+- 手动 `allow_large_change=true` 只在核对上游变化后使用。
+
+## 13. 故障行为
+
+| 故障 | 自动行为 | 人工处理 |
+|---|---|---|
+| DNS、GitHub Pages或TLS失败 | 当前活动列表保持不变，脚本报错 | 检查路由器时间、DNS和出口 |
+| Manifest 无效或超过4 KiB | 停止 | 检查 Pages 内容和工作流 |
+| 条目数超出安全范围 | 停止 | 审核上游和生成器 |
+| Payload 下载不完整 | 删除临时文件，停止 | 等下次重试 |
+| 非活动槽导入中断 | 活动槽不变；非活动槽可残留部分数据 | 下次运行会先清理非活动槽 |
+| 两条 Mangle 缺失或重复 | 停止 | 恢复经审核的现网规则 |
+| 管理员在更新中修改规则 | 停止，活动槽不切换 | 检查变更来源 |
+| 第二条规则切换失败 | 尝试把两条规则恢复到旧槽 | 立即检查日志和两条规则 |
+| RouterOS 不再是7.24.4 | 停止，现有列表继续工作 | 完成新版兼容测试后更新脚本 |
+
+不要通过删除检查条件来“修复”失败；错误表示现网假设或发布数据已经变化。
+
+## 14. 回滚与卸载
+
+### 14.1 只停止自动更新，保持当前列表
+
+上传并执行：
+
+```routeros
+/import file-name=remove-automation.rsc verbose=yes dry-run
+/import file-name=remove-automation.rsc verbose=yes
+```
+
+该脚本移除 Scheduler、更新脚本和临时下载文件，保留当前 A/B Address List 以及两条 Mangle 的现有指向。
+
+### 14.2 完整切回2026-09-17静态列表
+
+前提是两张旧静态列表仍保留且数量分别为 1,520、948。上传并执行：
+
+```routeros
+/import file-name=rollback-to-legacy-20260917.rsc verbose=yes dry-run
+/import file-name=rollback-to-legacy-20260917.rsc verbose=yes
+```
+
+脚本会：
+
+1. 确认更新器未运行；
+2. 校验旧静态列表；
+3. 禁用 Scheduler；
+4. 将两条 Mangle 切回旧列表；
+5. 移除更新脚本和 Scheduler；
+6. 保留 A/B 列表供诊断。
+
+回滚后重新执行第 10 节业务验收。
+
+### 14.3 清理未引用的列表
+
+稳定观察至少七天后才能考虑删除旧静态列表。删除前必须确认没有任何 Mangle、NAT 或 Filter 规则引用：
+
+```routeros
+/ip firewall mangle print where dst-address-list="routercfg-isp-unicom-only-20260917"
+/ip firewall mangle print where dst-address-list="routercfg-isp-mobile-only-20260917"
+/ip firewall nat print where dst-address-list="routercfg-isp-unicom-only-20260917"
+/ip firewall nat print where dst-address-list="routercfg-isp-mobile-only-20260917"
+/ip firewall filter print where dst-address-list="routercfg-isp-unicom-only-20260917"
+/ip firewall filter print where dst-address-list="routercfg-isp-mobile-only-20260917"
+```
+
+一旦删除旧静态列表，第 14.2 节的快速回滚文件将不可再用；必须先从备份或原始 `.rsc` 恢复旧列表。
+
+不要删除当前活动 A/B 槽。Payload 自身也会拒绝覆盖任何仍被 Mangle 引用的槽位。
+
+## 15. RouterOS 升级
+
+更新器故意锁定 `7.24.4`。升级 RouterOS 前：
+
+1. 禁用 `routercfg-isp-list-update` Scheduler；
+2. 导出配置并保存二进制备份；
+3. 在目标版本验证 Fetch、JSON反序列化、Import、Mangle 和文件属性；
+4. 修改安装模板和已安装脚本中的版本检查；
+5. 手工运行一次，完成第 9～10 节验收；
+6. 再启用 Scheduler。
+
+版本检查失败不会影响已经活动的 Address List 和既有连接。
+
+## 16. 上游与文档
+
+- 数据源：[gaoyifan/china-operator-ip](https://github.com/gaoyifan/china-operator-ip)
+- RouterOS Fetch：[MikroTik Fetch](https://help.mikrotik.com/docs/spaces/ROS/pages/8978514/Fetch)
+- RouterOS 脚本：[MikroTik Scripting](https://help.mikrotik.com/docs/spaces/ROS/pages/47579229/Scripting)
+- RouterOS 导入：[MikroTik Configuration Management](https://help.mikrotik.com/docs/spaces/ROS/pages/328155/Configuration%2BManagement)
+- RouterOS Scheduler：[MikroTik Scheduler](https://help.mikrotik.com/docs/spaces/ROS/pages/40992881/Scheduler)
+- GitHub Pages Actions：[GitHub Pages deployment](https://docs.github.com/en/get-started/start-your-journey/deploying-your-website-automatically)

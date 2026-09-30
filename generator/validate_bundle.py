@@ -80,6 +80,8 @@ def validate_templates() -> None:
         routeros / "install-template.rsc",
         routeros / "remove-automation.rsc",
         routeros / "rollback-to-legacy-20260917.rsc",
+        routeros / "set-unknown-default-mobile.rsc",
+        routeros / "restore-unknown-default-previous.rsc",
     ]
     for path in files:
         if not path.is_file():
@@ -107,6 +109,76 @@ def validate_templates() -> None:
         raise ValueError("installer/updater must never remove mangle rules")
     if '[:pick [:tostr [/system resource get version]] 0 6]' in installer:
         raise ValueError("installer still contains the obsolete exact-version guard")
+
+    mobile_switch = (routeros / "set-unknown-default-mobile.rsc").read_text(
+        encoding="ascii"
+    )
+    for required in (
+        "PCC bypass: destinations owned by this router",
+        "Mark inbound connections from Unicom PPPoE",
+        "PT tracker: 192.168.99.4 HTTP HTTPS via Unicom",
+        "routercfg DNS pin: OpenWrt Unicom DNS",
+        "VPS pairing: classify 154.17.228.232",
+        "routercfg failover: Unicom backup for Mobile policy table",
+        "routercfg phase6: public Unicom",
+        "routercfg phase6 hairpin dstnat:",
+        "qos_priority_vps",
+        "new-connection-mark=conn_mobile",
+        "rollback=Unicom",
+        "rollback=PCC",
+    ):
+        if required not in mobile_switch:
+            raise ValueError(f"Mobile-default switch is missing guard: {required}")
+    if "/ip firewall mangle remove" in mobile_switch:
+        raise ValueError("Mobile-default switch must not remove mangle rules")
+    if "/ip firewall connection remove" in mobile_switch:
+        raise ValueError("Mobile-default switch must not flush tracked connections")
+    switch_mutations = [
+        line.strip()
+        for line in mobile_switch.splitlines()
+        if line.lstrip().startswith("/ip firewall mangle ")
+        or ("do={ /ip firewall mangle " in line)
+    ]
+    expected_switch_mutations = [
+        "/ip firewall mangle set $fallback new-connection-mark=conn_mobile comment=$appliedComment",
+        "/ip firewall mangle enable $fallback",
+        ":foreach ruleId in=$bucketIds do={ /ip firewall mangle disable $ruleId }",
+    ]
+    if switch_mutations != expected_switch_mutations:
+        raise ValueError(
+            "Mobile-default switch must mutate only the managed fallback and five PCC buckets"
+        )
+
+    mobile_restore = (
+        routeros / "restore-unknown-default-previous.rsc"
+    ).read_text(encoding="ascii")
+    for required in (
+        "rollback=Unicom",
+        "rollback=PCC",
+        "untagged state is mixed",
+        "PCC bucket",
+        "new-connection-mark=conn_unicom",
+    ):
+        if required not in mobile_restore:
+            raise ValueError(f"Mobile-default restore is missing guard: {required}")
+    if "/ip firewall mangle remove" in mobile_restore:
+        raise ValueError("Mobile-default restore must not remove mangle rules")
+    restore_mutations = [
+        line.strip()
+        for line in mobile_restore.splitlines()
+        if line.lstrip().startswith("/ip firewall mangle ")
+        or ("do={ /ip firewall mangle " in line)
+    ]
+    expected_restore_mutations = [
+        "/ip firewall mangle set $fallback new-connection-mark=conn_unicom comment=$oldComment",
+        ":foreach ruleId in=$bucketIds do={ /ip firewall mangle enable $ruleId }",
+        "/ip firewall mangle disable $fallback",
+        "/ip firewall mangle set $fallback new-connection-mark=conn_unicom comment=$oldComment",
+    ]
+    if restore_mutations != expected_restore_mutations:
+        raise ValueError(
+            "Mobile-default restore must mutate only the managed fallback and five PCC buckets"
+        )
 
     block_pattern = re.compile(
         r"# ROUTEROS_COMPATIBILITY_POLICY_BEGIN\n(.*?)"
@@ -142,6 +214,15 @@ def validate_templates() -> None:
         raise ValueError("workflow must not bypass the production change gate")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for required in (
+        "未知目标改为移动后的完整影响边界",
+        "set-unknown-default-mobile.rsc",
+        "restore-unknown-default-previous.rsc",
+        "不会主动探测业务可达性",
+        "IPv6 不经过这些 IPv4",
+    ):
+        if required not in readme:
+            raise ValueError(f"README is missing Mobile-default guidance: {required}")
     for obsolete in (
         "RouterOS 不再是7.24.4",
         "更新器故意锁定",

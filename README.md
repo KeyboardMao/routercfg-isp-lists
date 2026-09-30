@@ -3,7 +3,7 @@
 适用环境：
 
 - RouterOS v7，版本不低于 `7.24.4`，版本标记为 `stable` 或 `long-term`；
-- 已部署本目录上级工程中的“联通独有 / 移动独有 / 未知默认联通”策略；
+- 已部署本目录上级工程中的“联通独有 / 移动独有”策略；普通未知目标可保持原来的联通/PCC 模式，也可按第 8.1 节切换为移动优先；
 - 下列两条 Mangle 规则各存在且仅存在一条：
   - `routercfg ISP affinity: ordinary Unicom-only destination`
   - `routercfg ISP affinity: ordinary Mobile-only destination`
@@ -12,7 +12,7 @@
   - `routercfg-isp-unicom-only-20260917`，预期 1,520 项；
   - `routercfg-isp-mobile-only-20260917`，预期 948 项。
 
-这套方案不会修改 NAT、Filter、队列、PCC、VPS 配对、PT 专用规则或未知目标的联通兜底规则。自动更新只维护两组专用 A/B Address List，并只切换上述两条 Mangle 规则的 `dst-address-list`。
+Address List 自动更新不会修改 NAT、Filter、队列、普通 PCC、VPS 配对、PT 专用规则或未知目标兜底。它只维护两组专用 A/B Address List，并只切换上述两条 Mangle 规则的 `dst-address-list`。第 8.1 节的未知目标切换是一次性、独立操作，之后每天更新地址库不会覆盖它。
 
 ## 1. 方案边界
 
@@ -40,6 +40,29 @@
 - RouterOS 跨主版本升级、切换到测试通道或低于最低版本时的兼容性复核；
 - 是否清理原始 2026-09-17 静态列表；
 - 是否回滚到静态列表。
+
+### 1.3 未知目标改为移动后的完整影响边界
+
+`set-unknown-default-mobile.rsc` 只修改六个既有 Mangle 对象：把一条普通未知目标兜底的连接标记改为 `conn_mobile` 并启用它，同时禁用五条普通 2:3 PCC 规则。脚本不会新增、删除或移动任何规则，也不会清空 Connection Tracking。
+
+实际匹配优先级如下：
+
+| 优先级 | 流量 | 结果 | 是否受未知目标切换影响 |
+|---:|---|---|---|
+| 1 | 从联通或移动 PPPoE 进入的连接 | 按进入线路标记，回包保持同一 WAN | 不受影响 |
+| 2 | 路由器本机、RFC1918、LAN、光猫管理网、IKEv2 网段 | 在互联网策略分类前 `accept` | 不受影响 |
+| 3 | 两个 VPS 目的地址 | 继续使用 VPS A/B 当前配对及两条主表 `/32` 路由 | 不受影响 |
+| 4 | `192.168.99.4` 的 Tracker 和 PT 流量 | Tracker 固定联通；其他 PT 新连接按 1/5 联通、4/5 移动 | 不受影响 |
+| 5 | OpenWrt 到 `202.99.96.68`、`211.137.160.5` | 分别固定联通、移动 | 不受影响 |
+| 6 | 联通独有、移动独有目的 | 分别固定到对应运营商；A/B 地址库更新继续生效 | 不受影响 |
+| 7 | 其余普通 LAN 新 IPv4 连接 | 标记为 `conn_mobile`，进入 `to_mobile` | 改为移动优先 |
+| 8 | 已有连接 | 保留原 `connection-mark`，直到自然断开重建 | 不会立即迁移 |
+
+`to_mobile` 的主默认路由是移动 `distance=51`，备用是联通 `distance=151`。移动 PPPoE 接口或对应路由失效时，策略表可以改走联通并由联通 Masquerade 出口。该机制根据接口/路由活动状态切换；如果 PPPoE 仍显示在线但运营商上游黑洞，它不会主动探测业务可达性。
+
+端口映射仍只允许从联通 PPPoE 进入，WAN 入站连接标记和路由器本机 `output` 回包规则保持回程对称。Hairpin 使用 `dst-address-type=local`，在未知兜底的 `!local` 条件之外。IKEv2 客户端进入的接口不是 `LAN01`，VPN/LAN/光猫管理目标也被 RFC1918 规则提前绕过。QoS 根据实际 PPPoE 出接口标记数据包；未知流量转到移动后会计入移动队列。IPv6 不经过这些 IPv4 Address List 和 IPv4 Mangle 规则。
+
+切换脚本在首次修改前核对以上依赖，包括规则属性和顺序、两张策略表的主备默认路由、每条 WAN 的通用 Masquerade、VPS `/32` 路由、公共端口映射、Hairpin、VPN 放行、QoS 以及 FastTrack 状态。任何对象缺失、重复或漂移都会报错并停止。
 
 ## 2. 安全模型
 
@@ -69,6 +92,10 @@ routeros/install-template.rsc       RouterOS 安装模板
 routeros/remove-automation.rsc      只移除自动化，保留当前列表和选路
 routeros/rollback-to-legacy-20260917.rsc
                                     切回静态列表并移除自动化
+routeros/set-unknown-default-mobile.rsc
+                                    将普通未知/重叠目的切为移动优先
+routeros/restore-unknown-default-previous.rsc
+                                    恢复切换前记录的联通或普通 PCC 模式
 ```
 
 ## 4. 建立 GitHub 发布仓库
@@ -298,6 +325,49 @@ sed "s|BASE_URL_REPLACE_ME|${base_url}|g" \
 
 确认后按 `Ctrl+X` 提交 Safe Mode。若任何检查失败，按 `Ctrl+D` 放弃并重新登录检查。
 
+### 8.1 将普通未知目标切换为移动优先
+
+把下列两个文件上传到 RouterOS Files 根目录：
+
+```text
+set-unknown-default-mobile.rsc
+restore-unknown-default-previous.rsc
+```
+
+先保存当前文本导出，并进行只读语法和前置条件检查：
+
+```routeros
+/export show-sensitive=no file=before-unknown-default-mobile
+/import file-name=set-unknown-default-mobile.rsc verbose=yes dry-run
+```
+
+`dry-run` 必须完整结束且没有 `error`。随后从可靠的 LAN 管理终端按 `Ctrl+X` 进入 Safe Mode，再执行：
+
+```routeros
+/import file-name=set-unknown-default-mobile.rsc verbose=yes
+/ip firewall mangle print detail without-paging where comment~"^routercfg ISP affinity: ordinary"
+/ip firewall mangle print detail without-paging where comment~"^PCC weighted"
+/ip route print detail without-paging where routing-table="to_mobile" and dst-address="0.0.0.0/0"
+```
+
+应看到：
+
+- 未知规则注释以 `ordinary unknown destination via Mobile` 开头，`disabled=no`，`new-connection-mark=conn_mobile`；
+- 五条 `PCC weighted` 均为 `disabled=yes`；
+- 联通独有和移动独有两条规则仍启用；
+- `to_mobile` 中移动主路由和联通备用路由均存在。
+
+不要清空整个 Connection Tracking。用一台非 `192.168.99.4` 的普通 LAN 主机新建连接，分别测试未知目的、联通独有目的、移动独有目的、两个 VPS、两台运营商 DNS、内网管理地址和 Hairpin 服务。检查规则计数、连接标记、实际出口和现有入站端口映射。全部通过后按 `Ctrl+X` 提交 Safe Mode；失败时按 `Ctrl+D` 断开，让 Safe Mode 自动撤销。
+
+脚本会把切换前状态记录在兜底规则注释中。如果需要恢复，在 Safe Mode 中执行：
+
+```routeros
+/import file-name=restore-unknown-default-previous.rsc verbose=yes dry-run
+/import file-name=restore-unknown-default-previous.rsc verbose=yes
+```
+
+原状态是未知默认联通时，回滚会恢复该规则；原状态是普通 2:3 PCC 时，回滚会重新启用五个 PCC 桶并禁用兜底。重复执行切换或回滚会先验证完整状态，不会叠加规则。
+
 ## 9. 第一次手工更新和切换
 
 第一次运行会创建约数千条 Address List，不能放在 RouterOS Safe Mode 中执行；Safe Mode 的历史动作容量不适合这种批量导入。A/B 设计保证生成失败时活动静态列表不被删除。
@@ -389,7 +459,7 @@ nslookup www.amap.com 211.137.160.5
 
 验收项目：
 
-- 联通、移动、未知三条分类规则均能在对应测试中增加计数；
+- 联通、移动两条分类规则和当前启用的未知/PCC模式均能在对应测试中增加计数；
 - 新连接的 `connection-mark` 与目标分类一致；
 - VPS A/B、PT、Tracker 和 DNS pin 行为未改变；
 - 常用网站、管理连接和 DNS 正常；

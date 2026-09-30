@@ -107,12 +107,13 @@
     /system script remove [find where name=$updaterName and comment=$updaterComment]
 
     /system script add name=$updaterName policy=ftp,read,write,test,policy dont-require-permissions=no comment=$updaterComment source={
+        :onerror updaterError in={
         :if ([/system script job print count-only as-value where script=[:jobname]] > 1) do={
             :error "ISP list updater: another instance is already running"
         }
 
         :local baseUrl "BASE_URL_REPLACE_ME"
-        :local schema "routercfg.isp-affinity-lists"
+        :local releaseSchema "routercfg.isp-affinity-lists"
         :local updaterName "routercfg-isp-list-update"
         :local updaterComment "routercfg: automatic disjoint ISP address-list updater"
         :local unicomRuleComment "routercfg ISP affinity: ordinary Unicom-only destination"
@@ -210,22 +211,22 @@
         :if (([:len $manifestText] < 100) || ([:len $manifestText] > 4096)) do={
             :error ("ISP list updater: manifest size is invalid: " . [:len $manifestText])
         }
-        :local manifest
+        :local releaseManifest
         :onerror jsonError in={
-            :set manifest [:deserialize from=json value=$manifestText options=json.no-string-conversion]
+            :set releaseManifest [:deserialize from=json value=$manifestText options=json.no-string-conversion]
         } do={
             :error ("ISP list updater: manifest JSON is invalid: " . $jsonError)
         }
 
-        :if ([:tostr ($manifest->"schema")] != $schema) do={ :error "ISP list updater: manifest schema mismatch" }
-        :if ([:tonum ($manifest->"schema_version")] != 1) do={ :error "ISP list updater: manifest version mismatch" }
-        :local version [:tostr ($manifest->"version")]
-        :local marker [:tostr ($manifest->"marker")]
-        :if (([:len $version] != 16) || (($version ~ "^[0-9a-f]+$") = false) || \
-            ($marker != ("routercfg-auto:" . $version))) do={
+        :if ([:tostr ($releaseManifest->"schema")] != $releaseSchema) do={ :error "ISP list updater: manifest schema mismatch" }
+        :if ([:tonum ($releaseManifest->"schema_version")] != 1) do={ :error "ISP list updater: manifest version mismatch" }
+        :local releaseToken [:tostr ($releaseManifest->"version")]
+        :local releaseMarker [:tostr ($releaseManifest->"marker")]
+        :if (([:len $releaseToken] != 16) || (($releaseToken ~ "^[0-9a-f]+$") = false) || \
+            ($releaseMarker != ("routercfg-auto:" . $releaseToken))) do={
             :error "ISP list updater: manifest release identity is invalid"
         }
-        :local listMeta ($manifest->"lists")
+        :local listMeta ($releaseManifest->"lists")
         :local unicomMeta ($listMeta->"unicom")
         :local mobileMeta ($listMeta->"mobile")
         :local expectedUnicom [:tonum ($unicomMeta->"count")]
@@ -244,14 +245,14 @@
         :if ($activeSlot != "legacy") do={
             :if (([/ip firewall address-list print count-only as-value where list=$activeUnicom] = $expectedUnicom) && \
                 ([/ip firewall address-list print count-only as-value where list=$activeMobile] = $expectedMobile) && \
-                ([/ip firewall address-list print count-only as-value where list=$activeUnicom and comment=$marker] = 1) && \
-                ([/ip firewall address-list print count-only as-value where list=$activeMobile and comment=$marker] = 1)) do={
+                ([/ip firewall address-list print count-only as-value where list=$activeUnicom and comment=$releaseMarker] = 1) && \
+                ([/ip firewall address-list print count-only as-value where list=$activeMobile and comment=$releaseMarker] = 1)) do={
                 :set alreadyCurrent true
             }
         }
 
         :if ($alreadyCurrent = true) do={
-            :log info ("ISP list updater: already current; slot=" . $activeSlot . " version=" . $version)
+            :log info ("ISP list updater: already current; slot=" . $activeSlot . " version=" . $releaseToken)
         } else={
             :local targetSlot "a"
             :local targetUnicom $aUnicom
@@ -262,12 +263,12 @@
                 :set targetMobile $bMobile
             }
 
-            :local slots ($manifest->"slots")
+            :local releaseSlots ($releaseManifest->"slots")
             :local slotMeta
             :local expectedFile "slot-a.rsc"
-            :if ($targetSlot = "a") do={ :set slotMeta ($slots->"a") }
+            :if ($targetSlot = "a") do={ :set slotMeta ($releaseSlots->"a") }
             :if ($targetSlot = "b") do={
-                :set slotMeta ($slots->"b")
+                :set slotMeta ($releaseSlots->"b")
                 :set expectedFile "slot-b.rsc"
             }
             :local remoteFile [:tostr ($slotMeta->"file")]
@@ -313,8 +314,8 @@
 
             :if (([/ip firewall address-list print count-only as-value where list=$targetUnicom] != $expectedUnicom) || \
                 ([/ip firewall address-list print count-only as-value where list=$targetMobile] != $expectedMobile) || \
-                ([/ip firewall address-list print count-only as-value where list=$targetUnicom and comment=$marker] != 1) || \
-                ([/ip firewall address-list print count-only as-value where list=$targetMobile and comment=$marker] != 1)) do={
+                ([/ip firewall address-list print count-only as-value where list=$targetUnicom and comment=$releaseMarker] != 1) || \
+                ([/ip firewall address-list print count-only as-value where list=$targetMobile and comment=$releaseMarker] != 1)) do={
                 /file remove [find where name=$temporaryFile]
                 :error "ISP list updater: inactive slot post-import validation failed; active slot was preserved"
             }
@@ -346,7 +347,12 @@
             }
 
             /file remove [find where name=$temporaryFile]
-            :log warning ("ISP list updater: switched from " . $activeSlot . " to " . $targetSlot . "; version=" . $version . "; Unicom=" . $expectedUnicom . "; Mobile=" . $expectedMobile)
+            :log warning ("ISP list updater: switched from " . $activeSlot . " to " . $targetSlot . "; version=" . $releaseToken . "; Unicom=" . $expectedUnicom . "; Mobile=" . $expectedMobile)
+        }
+        } do={
+            :local updaterFailureText [:tostr $updaterError]
+            :log error ("ISP list updater FAILED: " . $updaterFailureText)
+            :error $updaterFailureText
         }
     }
 
@@ -359,8 +365,8 @@
     :if ([/system scheduler print count-only as-value where name=$updaterName and comment=$schedulerComment] != 1) do={
         :error "routercfg ISP auto updater: scheduler post-check failed"
     }
-    :local scheduler [/system scheduler find where name=$updaterName and comment=$schedulerComment]
-    :if ([:tostr [/system scheduler get $scheduler disabled]] != "true") do={
+    :local managedSchedulerId [/system scheduler find where name=$updaterName and comment=$schedulerComment]
+    :if ([:tostr [/system scheduler get $managedSchedulerId disabled]] != "true") do={
         :error "routercfg ISP auto updater: scheduler was not installed disabled"
     }
 

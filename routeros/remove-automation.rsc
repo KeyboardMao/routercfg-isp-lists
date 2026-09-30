@@ -16,18 +16,18 @@
         :error "ISP list updater remover: duplicate managed schedulers"
     }
     :if ([/system script print count-only as-value where name=$updaterName] = 1) do={
-        :local script [/system script find where name=$updaterName]
-        :if ([:tostr [/system script get $script comment]] != $updaterComment) do={
+        :local managedScriptId [/system script find where name=$updaterName]
+        :if ([:tostr [/system script get $managedScriptId comment]] != $updaterComment) do={
             :error "ISP list updater remover: script identity check failed"
         }
     }
     :if ([/system scheduler print count-only as-value where name=$updaterName] = 1) do={
-        :local scheduler [/system scheduler find where name=$updaterName]
-        :if ([:tostr [/system scheduler get $scheduler comment]] != $schedulerComment) do={
+        :local managedSchedulerId [/system scheduler find where name=$updaterName]
+        :if ([:tostr [/system scheduler get $managedSchedulerId comment]] != $schedulerComment) do={
             :error "ISP list updater remover: scheduler identity check failed"
         }
-        /system scheduler disable $scheduler
-        /system scheduler remove $scheduler
+        /system scheduler disable $managedSchedulerId
+        /system scheduler remove $managedSchedulerId
     }
     /system script remove [find where name=$updaterName and comment=$updaterComment]
     /file remove [find where name="routercfg-isp-auto-a.rsc"]

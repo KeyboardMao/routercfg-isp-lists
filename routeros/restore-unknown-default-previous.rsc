@@ -56,17 +56,17 @@
     :local gen4 [/ip firewall mangle find where comment=$gen4Comment]
     :local bucketIds {$gen0;$gen1;$gen2;$gen3;$gen4}
     :local enabledBuckets 0
-    :for n from=0 to=4 do={
-        :local ruleId [:pick $bucketIds $n]
+    :for bucketIndex from=0 to=4 do={
+        :local ruleId [:pick $bucketIds $bucketIndex]
         :if (([:tostr [/ip firewall mangle get $ruleId chain]] != "prerouting") || \
             ([:tostr [/ip firewall mangle get $ruleId action]] != "mark-connection") || \
             ([:tostr [/ip firewall mangle get $ruleId in-interface]] != "LAN01") || \
             ([:tostr [/ip firewall mangle get $ruleId dst-address-type]] != "!local") || \
             ([:tostr [/ip firewall mangle get $ruleId connection-state]] != "new") || \
             ([:tostr [/ip firewall mangle get $ruleId connection-mark]] != "no-mark") || \
-            ([:tostr [/ip firewall mangle get $ruleId per-connection-classifier]] != [:pick $expectedBuckets $n]) || \
-            ([:tostr [/ip firewall mangle get $ruleId new-connection-mark]] != [:pick $expectedMarks $n])) do={
-            :error ("routercfg unknown-default-Mobile rollback: PCC bucket " . $n . " identity changed")
+            ([:tostr [/ip firewall mangle get $ruleId per-connection-classifier]] != [:pick $expectedBuckets $bucketIndex]) || \
+            ([:tostr [/ip firewall mangle get $ruleId new-connection-mark]] != [:pick $expectedMarks $bucketIndex])) do={
+            :error ("routercfg unknown-default-Mobile rollback: PCC bucket " . $bucketIndex . " identity changed")
         }
         :if ([:tostr [/ip firewall mangle get $ruleId disabled]] = "false") do={
             :set enabledBuckets ($enabledBuckets + 1)
@@ -81,14 +81,14 @@
         :error "routercfg unknown-default-Mobile rollback: fallback is missing, duplicated or has an unknown identity"
     }
 
-    :local mode ""
+    :local restoreMode ""
     :local fallback
     :if ([/ip firewall mangle print count-only as-value where comment=$mobileFromUnicom] = 1) do={
-        :set mode "Unicom"
+        :set restoreMode "Unicom"
         :set fallback [/ip firewall mangle find where comment=$mobileFromUnicom]
     }
     :if ([/ip firewall mangle print count-only as-value where comment=$mobileFromPcc] = 1) do={
-        :set mode "PCC"
+        :set restoreMode "PCC"
         :set fallback [/ip firewall mangle find where comment=$mobileFromPcc]
     }
     :if ($oldCount = 1) do={
@@ -121,10 +121,10 @@
             :error "routercfg unknown-default-Mobile rollback: managed Mobile state is inconsistent"
         }
 
-        :if ($mode = "Unicom") do={
+        :if ($restoreMode = "Unicom") do={
             /ip firewall mangle set $fallback new-connection-mark=conn_unicom comment=$oldComment
         }
-        :if ($mode = "PCC") do={
+        :if ($restoreMode = "PCC") do={
             # The earlier fallback stays active while all buckets are enabled.
             # Disabling it last avoids a temporary unclassified gap.
             :foreach ruleId in=$bucketIds do={ /ip firewall mangle enable $ruleId }
@@ -134,7 +134,7 @@
 
         :local expectedFallbackDisabled "false"
         :local expectedBucketDisabled "true"
-        :if ($mode = "PCC") do={
+        :if ($restoreMode = "PCC") do={
             :set expectedFallbackDisabled "true"
             :set expectedBucketDisabled "false"
         }
@@ -148,8 +148,8 @@
                 :error "routercfg unknown-default-Mobile rollback: PCC post-check failed; discard Safe Mode"
             }
         }
-        :log warning ("routercfg unknown-default-Mobile rollback complete; restored=" . $mode)
-        :put ("Unknown-destination policy restored to prior mode: " . $mode)
+        :log warning ("routercfg unknown-default-Mobile rollback complete; restored=" . $restoreMode)
+        :put ("Unknown-destination policy restored to prior mode: " . $restoreMode)
     }
     } do={
         :local failureText [:tostr $caughtError]

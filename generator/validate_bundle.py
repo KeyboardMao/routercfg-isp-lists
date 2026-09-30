@@ -102,6 +102,7 @@ def validate_templates() -> None:
         "list counts are missing or non-numeric",
         "payload size is missing or non-numeric",
         "Reinstallation is the supported migration path",
+        ':log error ("ISP list updater FAILED:',
     ):
         if required not in installer:
             raise ValueError(f"install template is missing required guard: {required}")
@@ -123,6 +124,11 @@ def validate_templates() -> None:
         "routercfg phase6: public Unicom",
         "routercfg phase6 hairpin dstnat:",
         "qos_priority_vps",
+        "unreviewed prerouting policy rule",
+        "preroutingRuleCount != 27",
+        "preroutingClassifierCount != 21",
+        "preroutingRoutingCount != 4",
+        "preroutingBypassCount != 2",
         "new-connection-mark=conn_mobile",
         "rollback=Unicom",
         "rollback=PCC",
@@ -167,6 +173,65 @@ def validate_templates() -> None:
             raise ValueError(f"Mobile-default restore is missing guard: {required}")
     if "/ip firewall mangle remove" in mobile_restore:
         raise ValueError("Mobile-default restore must not remove mangle rules")
+    reserved_local_names = {
+        "action",
+        "address",
+        "chain",
+        "comment",
+        "disabled",
+        "distance",
+        "gateway",
+        "interface",
+        "mode",
+        "n",
+        "name",
+        "position",
+        "protocol",
+        "scheduler",
+        "schema",
+        "script",
+        "type",
+        "version",
+    }
+    managed_script_texts = [
+        (path.name, path.read_text(encoding="ascii")) for path in files
+    ]
+    for script_name, script_text in managed_script_texts:
+        local_names = set(re.findall(r"(?m)^\s*:local\s+([A-Za-z][A-Za-z0-9]*)", script_text))
+        loop_names = set(
+            re.findall(r"(?m)^\s*:(?:for|foreach)\s+([A-Za-z][A-Za-z0-9]*)", script_text)
+        )
+        conflicts = sorted((local_names | loop_names) & reserved_local_names)
+        if conflicts:
+            raise ValueError(
+                f"{script_name} uses reserved RouterOS property names as locals: {conflicts}"
+            )
+    for script_name, script_text in (
+        ("Mobile-default switch", mobile_switch),
+        ("Mobile-default restore", mobile_restore),
+    ):
+        compatibility_blocks = re.findall(
+            r"# ROUTEROS_COMPATIBILITY_POLICY_BEGIN\n(.*?)"
+            r"# ROUTEROS_COMPATIBILITY_POLICY_END",
+            script_text,
+            re.DOTALL,
+        )
+        if len(compatibility_blocks) != 1:
+            raise ValueError(f"{script_name} must contain one compatibility policy")
+        for required in (
+            ':local minimumRouterVersion "7.24.4"',
+            ":local supportedMajor 7",
+            '"(stable)"',
+            '"(long-term)"',
+            '"^[0-9]+\\\\.[0-9]+\\\\.[0-9]+$"',
+            "($routerMajor != $supportedMajor)",
+            "($routerMinor < 24)",
+            "($routerPatch < 4)",
+        ):
+            if required not in compatibility_blocks[0]:
+                raise ValueError(
+                    f"{script_name} compatibility policy is missing: {required}"
+                )
     restore_mutations = [
         line.strip()
         for line in mobile_restore.splitlines()
@@ -211,7 +276,12 @@ def validate_templates() -> None:
     workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
     if 'cron: "0 16 * * *"' not in workflow:
         raise ValueError("workflow must run at 00:00 Asia/Shanghai")
-    for required in ('- "routeros/**"', '- "README.md"', "--max-filesize 4096"):
+    for required in (
+        '- "routeros/**"',
+        '- "README.md"',
+        '- "AUDIT-ROUTEROS-*.md"',
+        "--max-filesize 4096",
+    ):
         if required not in workflow:
             raise ValueError(f"workflow is missing safety requirement: {required}")
     if "--output /tmp/previous-manifest.json || true" in workflow:
@@ -225,13 +295,32 @@ def validate_templates() -> None:
         "不会主动探测业务可达性",
         "IPv6 不经过这些 IPv4",
         "RouterOS 默认系统日志容量有限",
+        "本次命令兼容性审计日期为 2026-09-30",
+        "当前长期维护版 `7.23.7 (long-term)` 低于最低版本",
+        "根目录中名称带 `7.24.2`",
+        "/export file=before-unknown-default-mobile",
     ):
         if required not in readme:
             raise ValueError(f"README is missing Mobile-default guidance: {required}")
+    audit_path = ROOT / "AUDIT-ROUTEROS-7.24.4-20260930.md"
+    if not audit_path.is_file():
+        raise ValueError("RouterOS 7.24.4 audit report is missing")
+    audit = audit_path.read_text(encoding="utf-8")
+    for required in (
+        "精确为 27 条规则",
+        "21 个 `mark-connection` 分类器",
+        "4 个 `mark-routing`",
+        "7.23.7 (long-term)",
+        "没有连接目标 RouterOS",
+        "不能替代目标设备的 dry-run",
+    ):
+        if required not in audit:
+            raise ValueError(f"RouterOS audit report is missing: {required}")
     for obsolete in (
         "RouterOS 不再是7.24.4",
         "更新器故意锁定",
         "RouterOS 显示 ",
+        "show-sensitive=no",
     ):
         if obsolete in readme:
             raise ValueError(f"README contains obsolete version guidance: {obsolete}")

@@ -88,6 +88,7 @@ generator/generate.py               无第三方 Python 依赖的生成器
 generator/test_*.py                 集合运算、URL、版本策略和安全门测试
 generator/validate_bundle.py        模板和发布文件静态检查
 generator/prepare_installer.py       安全生成含 Pages URL 的安装文件
+AUDIT-ROUTEROS-7.24.4-20260930.md    本次策略、命令和版本兼容性审计报告
 routeros/install-template.rsc       RouterOS 安装模板
 routeros/remove-automation.rsc      只移除自动化，保留当前列表和选路
 routeros/rollback-to-legacy-20260917.rsc
@@ -337,7 +338,7 @@ restore-unknown-default-previous.rsc
 先保存当前文本导出，并进行只读语法和前置条件检查：
 
 ```routeros
-/export show-sensitive=no file=before-unknown-default-mobile
+/export file=before-unknown-default-mobile
 /import file-name=set-unknown-default-mobile.rsc verbose=yes dry-run
 ```
 
@@ -387,6 +388,8 @@ routercfg unknown-default-Mobile FAILED: Mobile-table Unicom backup changed
 ```
 
 RouterOS 默认系统日志容量有限，旧记录会轮换。如果需要跨重启、长期保存或告警，应另外配置远程 Syslog；本项目不自动修改现有 Logging action，避免影响其他日志策略。
+
+自动更新器在最外层捕获任何未处理错误，把原始原因写成 `ISP list updater FAILED: ...` 后重新以失败状态退出。内部下载、导入和策略切换仍保留各自的清理或回滚；因此 Scheduler 无人值守运行失败时，可以用上面的日志命令定位准确阶段。
 
 ## 9. 第一次手工更新和切换
 
@@ -598,6 +601,28 @@ GitHub 侧检查：
 - 主版本必须是 v7；
 - 版本必须不低于 `7.24.4`；
 - 通道标记必须是 `(stable)` 或 `(long-term)`。
+
+本次命令兼容性审计日期为 2026-09-30。MikroTik 官方发布记录中的当前稳定版是 `7.24.4 (stable)`，与本项目实际基线一致；当前长期维护版 `7.23.7 (long-term)` 低于最低版本，因此会被脚本明确拒绝。导入前先确认设备返回值：
+
+```routeros
+:put [/system resource get version]
+```
+
+当前目标设备应显示：
+
+```text
+7.24.4 (stable)
+```
+
+本次使用的命令均适用于该版本：
+
+- `/import ... verbose=yes dry-run` 从 RouterOS 7.16 起提供；
+- `:onerror <变量> in={...} do={...}`、`:log error`、`:error` 可用于保留错误详情并失败退出；
+- `/routing table ... fib`、`/routing rule`、routing mark 属于 RouterOS v7 策略路由接口；
+- Mangle 的 `mark-connection`、`mark-routing`、`connection-state=new`、`connection-mark=no-mark`、PCC 和 `passthrough` 均为当前支持属性；
+- `/export file=...` 默认隐藏敏感信息；`print count-only as-value` 和 `where` 过滤均受支持。
+
+根目录中名称带 `7.24.2`、旧 `7.24.4` 精确版本检查的历史部署脚本用于说明既有配置的形成过程，不应在当前设备上重新批量导入。新的 Address List 安装器、更新器、未知目标移动切换和回滚脚本使用统一的数字版本检查。
 
 因此，从 `7.24.4` 升级到后续 v7 稳定版或长期维护版后，已安装的新版更新器会继续按计划自动更新列表，不需要每次修改脚本。版本比较按数字段进行，例如 `7.24.10` 高于 `7.24.4`，不会发生字符串比较错误。
 

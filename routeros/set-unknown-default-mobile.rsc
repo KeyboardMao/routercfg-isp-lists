@@ -164,17 +164,17 @@
     :local expectedBuckets {"both-addresses:5/0";"both-addresses:5/1";"both-addresses:5/2";"both-addresses:5/3";"both-addresses:5/4"}
     :local expectedMarks {"conn_unicom";"conn_unicom";"conn_mobile";"conn_mobile";"conn_mobile"}
     :local enabledBuckets 0
-    :for n from=0 to=4 do={
-        :local ruleId [:pick $bucketIds $n]
+    :for bucketIndex from=0 to=4 do={
+        :local ruleId [:pick $bucketIds $bucketIndex]
         :if (([:tostr [/ip firewall mangle get $ruleId chain]] != "prerouting") || \
             ([:tostr [/ip firewall mangle get $ruleId action]] != "mark-connection") || \
             ([:tostr [/ip firewall mangle get $ruleId in-interface]] != "LAN01") || \
             ([:tostr [/ip firewall mangle get $ruleId dst-address-type]] != "!local") || \
             ([:tostr [/ip firewall mangle get $ruleId connection-mark]] != "no-mark") || \
             ([:tostr [/ip firewall mangle get $ruleId connection-state]] != "new") || \
-            ([:tostr [/ip firewall mangle get $ruleId per-connection-classifier]] != [:pick $expectedBuckets $n]) || \
-            ([:tostr [/ip firewall mangle get $ruleId new-connection-mark]] != [:pick $expectedMarks $n])) do={
-            :error ("routercfg unknown-default-Mobile: PCC bucket " . $n . " identity changed")
+            ([:tostr [/ip firewall mangle get $ruleId per-connection-classifier]] != [:pick $expectedBuckets $bucketIndex]) || \
+            ([:tostr [/ip firewall mangle get $ruleId new-connection-mark]] != [:pick $expectedMarks $bucketIndex])) do={
+            :error ("routercfg unknown-default-Mobile: PCC bucket " . $bucketIndex . " identity changed")
         }
         :if ([:tostr [/ip firewall mangle get $ruleId disabled]] = "false") do={
             :set enabledBuckets ($enabledBuckets + 1)
@@ -184,8 +184,8 @@
     # Validate every dedicated PT bucket. The unknown fallback explicitly excludes
     # 192.168.99.4, so the existing 1/5 Unicom + 4/5 Mobile policy remains terminal.
     :local expectedPtMarks {"conn_unicom";"conn_mobile";"conn_mobile";"conn_mobile";"conn_mobile"}
-    :for n from=0 to=4 do={
-        :local ptComment [:pick $ptComments $n]
+    :for bucketIndex from=0 to=4 do={
+        :local ptComment [:pick $ptComments $bucketIndex]
         :local ptId [/ip firewall mangle find where comment=$ptComment]
         :if (([:tostr [/ip firewall mangle get $ptId chain]] != "prerouting") || \
             ([:tostr [/ip firewall mangle get $ptId action]] != "mark-connection") || \
@@ -194,10 +194,10 @@
             ([:tostr [/ip firewall mangle get $ptId dst-address-type]] != "!local") || \
             ([:tostr [/ip firewall mangle get $ptId connection-state]] != "new") || \
             ([:tostr [/ip firewall mangle get $ptId connection-mark]] != "no-mark") || \
-            ([:tostr [/ip firewall mangle get $ptId per-connection-classifier]] != ("both-addresses-and-ports:5/" . $n)) || \
-            ([:tostr [/ip firewall mangle get $ptId new-connection-mark]] != [:pick $expectedPtMarks $n]) || \
+            ([:tostr [/ip firewall mangle get $ptId per-connection-classifier]] != ("both-addresses-and-ports:5/" . $bucketIndex)) || \
+            ([:tostr [/ip firewall mangle get $ptId new-connection-mark]] != [:pick $expectedPtMarks $bucketIndex]) || \
             ([:tostr [/ip firewall mangle get $ptId disabled]] != "false")) do={
-            :error ("routercfg unknown-default-Mobile: PT bucket " . $n . " identity changed")
+            :error ("routercfg unknown-default-Mobile: PT bucket " . $bucketIndex . " identity changed")
         }
     }
 
@@ -474,6 +474,50 @@
         :error "routercfg unknown-default-Mobile: active FastTrack would bypass policy/QoS"
     }
 
+    # Treat the complete prerouting policy-routing surface as a closed set.
+    # Relative-order checks alone would not detect an unreviewed rule inserted
+    # between known anchors or a historical rule without in-interface=LAN01.
+    # Exactly 27 rules belong to this approved layout: 21 connection classifiers
+    # (19 LAN plus two PPPoE inbound), four routing-mark consumers and two bypasses.
+    :local preroutingRuleCount 0
+    :local preroutingClassifierCount 0
+    :local preroutingRoutingCount 0
+    :local preroutingBypassCount 0
+    :foreach mangleObjectId in=[/ip firewall mangle find] do={
+        :local mangleChainValue [:tostr [/ip firewall mangle get $mangleObjectId chain]]
+        :local mangleActionValue [:tostr [/ip firewall mangle get $mangleObjectId action]]
+        :if ($mangleChainValue = "prerouting") do={
+            :set preroutingRuleCount ($preroutingRuleCount + 1)
+            :local mangleCommentValue [:tostr [/ip firewall mangle get $mangleObjectId comment]]
+            :local approvedRule false
+            :foreach approvedComment in=$requiredComments do={
+                :if ($mangleCommentValue = $approvedComment) do={ :set approvedRule true }
+            }
+            :foreach approvedComment in=$genComments do={
+                :if ($mangleCommentValue = $approvedComment) do={ :set approvedRule true }
+            }
+            :foreach approvedComment in=$ptComments do={
+                :if ($mangleCommentValue = $approvedComment) do={ :set approvedRule true }
+            }
+            :foreach approvedComment in=$vpsComments do={
+                :if ($mangleCommentValue = $approvedComment) do={ :set approvedRule true }
+            }
+            :if (($mangleCommentValue = $unicomComment) || ($mangleCommentValue = $mobileComment) || \
+                ($mangleCommentValue = $oldComment) || ($mangleCommentValue = $mobileFromUnicom) || \
+                ($mangleCommentValue = $mobileFromPcc)) do={ :set approvedRule true }
+            :if ($approvedRule = false) do={
+                :error ("routercfg unknown-default-Mobile: unreviewed prerouting policy rule: " . $mangleObjectId . " comment=" . $mangleCommentValue)
+            }
+            :if ($mangleActionValue = "mark-connection") do={ :set preroutingClassifierCount ($preroutingClassifierCount + 1) }
+            :if ($mangleActionValue = "mark-routing") do={ :set preroutingRoutingCount ($preroutingRoutingCount + 1) }
+            :if ($mangleActionValue = "accept") do={ :set preroutingBypassCount ($preroutingBypassCount + 1) }
+        }
+    }
+    :if (($preroutingRuleCount != 27) || ($preroutingClassifierCount != 21) || \
+        ($preroutingRoutingCount != 4) || ($preroutingBypassCount != 2)) do={
+        :error ("routercfg unknown-default-Mobile: prerouting policy rule counts changed; total=" . $preroutingRuleCount . " classifiers=" . $preroutingClassifierCount . " routing=" . $preroutingRoutingCount . " bypasses=" . $preroutingBypassCount)
+    }
+
     :local pt0Comment [:pick $ptComments 0]
     :local pt4Comment [:pick $ptComments 4]
     :local pt0 [/ip firewall mangle find where comment=$pt0Comment]
@@ -484,33 +528,33 @@
     :local pDnsU -1; :local pDnsM -1; :local pU -1; :local pM -1; :local pFallback -1
     :local pG0 -1; :local pG1 -1; :local pG2 -1; :local pG3 -1; :local pG4 -1
     :local pRouteU -1; :local pRouteM -1
-    :local position 0
+    :local policyOrdinal 0
     :foreach ruleId in=[/ip firewall mangle find] do={
-        :if ($ruleId = $inboundU) do={ :set pInboundU $position }
-        :if ($ruleId = $inboundM) do={ :set pInboundM $position }
-        :if ($ruleId = $bypassLocal) do={ :set pBypassLocal $position }
-        :if ($ruleId = $bypassPrivate) do={ :set pBypassPrivate $position }
-        :if ($ruleId = $v154c) do={ :set pV154c $position }
-        :if ($ruleId = $v154r) do={ :set pV154r $position }
-        :if ($ruleId = $v45c) do={ :set pV45c $position }
-        :if ($ruleId = $v45r) do={ :set pV45r $position }
-        :if ($ruleId = $trackerTcp) do={ :set pTrackerTcp $position }
-        :if ($ruleId = $trackerQuic) do={ :set pTrackerQuic $position }
-        :if ($ruleId = $pt0) do={ :set pPt0 $position }
-        :if ($ruleId = $pt4) do={ :set pPt4 $position }
-        :if ($ruleId = $dnsU) do={ :set pDnsU $position }
-        :if ($ruleId = $dnsM) do={ :set pDnsM $position }
-        :if ($ruleId = $ispU) do={ :set pU $position }
-        :if ($ruleId = $ispM) do={ :set pM $position }
-        :if ($ruleId = $fallback) do={ :set pFallback $position }
-        :if ($ruleId = $gen0) do={ :set pG0 $position }
-        :if ($ruleId = $gen1) do={ :set pG1 $position }
-        :if ($ruleId = $gen2) do={ :set pG2 $position }
-        :if ($ruleId = $gen3) do={ :set pG3 $position }
-        :if ($ruleId = $gen4) do={ :set pG4 $position }
-        :if ($ruleId = $routeU) do={ :set pRouteU $position }
-        :if ($ruleId = $routeM) do={ :set pRouteM $position }
-        :set position ($position + 1)
+        :if ($ruleId = $inboundU) do={ :set pInboundU $policyOrdinal }
+        :if ($ruleId = $inboundM) do={ :set pInboundM $policyOrdinal }
+        :if ($ruleId = $bypassLocal) do={ :set pBypassLocal $policyOrdinal }
+        :if ($ruleId = $bypassPrivate) do={ :set pBypassPrivate $policyOrdinal }
+        :if ($ruleId = $v154c) do={ :set pV154c $policyOrdinal }
+        :if ($ruleId = $v154r) do={ :set pV154r $policyOrdinal }
+        :if ($ruleId = $v45c) do={ :set pV45c $policyOrdinal }
+        :if ($ruleId = $v45r) do={ :set pV45r $policyOrdinal }
+        :if ($ruleId = $trackerTcp) do={ :set pTrackerTcp $policyOrdinal }
+        :if ($ruleId = $trackerQuic) do={ :set pTrackerQuic $policyOrdinal }
+        :if ($ruleId = $pt0) do={ :set pPt0 $policyOrdinal }
+        :if ($ruleId = $pt4) do={ :set pPt4 $policyOrdinal }
+        :if ($ruleId = $dnsU) do={ :set pDnsU $policyOrdinal }
+        :if ($ruleId = $dnsM) do={ :set pDnsM $policyOrdinal }
+        :if ($ruleId = $ispU) do={ :set pU $policyOrdinal }
+        :if ($ruleId = $ispM) do={ :set pM $policyOrdinal }
+        :if ($ruleId = $fallback) do={ :set pFallback $policyOrdinal }
+        :if ($ruleId = $gen0) do={ :set pG0 $policyOrdinal }
+        :if ($ruleId = $gen1) do={ :set pG1 $policyOrdinal }
+        :if ($ruleId = $gen2) do={ :set pG2 $policyOrdinal }
+        :if ($ruleId = $gen3) do={ :set pG3 $policyOrdinal }
+        :if ($ruleId = $gen4) do={ :set pG4 $policyOrdinal }
+        :if ($ruleId = $routeU) do={ :set pRouteU $policyOrdinal }
+        :if ($ruleId = $routeM) do={ :set pRouteM $policyOrdinal }
+        :set policyOrdinal ($policyOrdinal + 1)
     }
     :if (($pInboundU < 0) || ($pInboundM < 0) || ($pInboundU >= $pBypassLocal) || ($pInboundM >= $pBypassLocal) || \
         ($pBypassLocal < 0) || ($pBypassPrivate < 0) || ($pBypassLocal >= $pBypassPrivate) || \

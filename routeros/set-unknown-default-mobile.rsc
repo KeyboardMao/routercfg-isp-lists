@@ -5,6 +5,7 @@
 # VPS A/B, PT, DNS pins and ISP-only destination rules must precede this rule.
 
 {
+    :onerror caughtError in={
     :log warning "routercfg unknown-default-Mobile migration: start"
 
     # ROUTEROS_COMPATIBILITY_POLICY_BEGIN
@@ -560,4 +561,10 @@
 
     :log warning ("routercfg unknown-default-Mobile active; prior mode=" . $previousMode)
     :put ("Unknown/overlap ordinary destinations now prefer Mobile; prior mode=" . $previousMode . ". VPS A/B remains higher priority. Test NEW connections before committing Safe Mode.")
+    } do={
+        :local failureText [:tostr $caughtError]
+        :log error ("routercfg unknown-default-Mobile FAILED: " . $failureText)
+        :put ("routercfg unknown-default-Mobile FAILED: " . $failureText)
+        :error $failureText
+    }
 }

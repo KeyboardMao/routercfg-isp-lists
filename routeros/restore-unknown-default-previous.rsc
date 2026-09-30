@@ -2,6 +2,7 @@
 # managed fallback rule comment by set-unknown-default-mobile.rsc.
 
 {
+    :onerror caughtError in={
     :log warning "routercfg unknown-default-Mobile rollback: start"
 
     # ROUTEROS_COMPATIBILITY_POLICY_BEGIN
@@ -149,5 +150,11 @@
         }
         :log warning ("routercfg unknown-default-Mobile rollback complete; restored=" . $mode)
         :put ("Unknown-destination policy restored to prior mode: " . $mode)
+    }
+    } do={
+        :local failureText [:tostr $caughtError]
+        :log error ("routercfg unknown-default-Mobile rollback FAILED: " . $failureText)
+        :put ("routercfg unknown-default-Mobile rollback FAILED: " . $failureText)
+        :error $failureText
     }
 }

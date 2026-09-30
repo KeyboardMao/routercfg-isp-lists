@@ -368,6 +368,26 @@ restore-unknown-default-previous.rsc
 
 原状态是未知默认联通时，回滚会恢复该规则；原状态是普通 2:3 PCC 时，回滚会重新启用五个 PCC 桶并禁用兜底。重复执行切换或回滚会先验证完整状态，不会叠加规则。
 
+切换和回滚脚本会捕获运行期错误，把原始错误详情写入 RouterOS 系统日志，然后继续以失败状态退出，不会把错误吞掉。查看本功能的开始、成功和失败记录：
+
+```routeros
+/log print without-paging where message~"routercfg unknown-default-Mobile"
+```
+
+失败记录包含固定的 `FAILED:` 标记，例如：
+
+```text
+routercfg unknown-default-Mobile FAILED: Mobile-table Unicom backup changed
+```
+
+每天运行的 Address List 更新器使用独立前缀：
+
+```routeros
+/log print without-paging where message~"ISP list updater"
+```
+
+RouterOS 默认系统日志容量有限，旧记录会轮换。如果需要跨重启、长期保存或告警，应另外配置远程 Syslog；本项目不自动修改现有 Logging action，避免影响其他日志策略。
+
 ## 9. 第一次手工更新和切换
 
 第一次运行会创建约数千条 Address List，不能放在 RouterOS Safe Mode 中执行；Safe Mode 的历史动作容量不适合这种批量导入。A/B 设计保证生成失败时活动静态列表不被删除。

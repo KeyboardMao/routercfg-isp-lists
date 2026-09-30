@@ -126,6 +126,8 @@ def validate_templates() -> None:
         "new-connection-mark=conn_mobile",
         "rollback=Unicom",
         "rollback=PCC",
+        ":onerror caughtError in={",
+        ":log error (\"routercfg unknown-default-Mobile FAILED:",
     ):
         if required not in mobile_switch:
             raise ValueError(f"Mobile-default switch is missing guard: {required}")
@@ -158,6 +160,8 @@ def validate_templates() -> None:
         "untagged state is mixed",
         "PCC bucket",
         "new-connection-mark=conn_unicom",
+        ":onerror caughtError in={",
+        ":log error (\"routercfg unknown-default-Mobile rollback FAILED:",
     ):
         if required not in mobile_restore:
             raise ValueError(f"Mobile-default restore is missing guard: {required}")
@@ -220,6 +224,7 @@ def validate_templates() -> None:
         "restore-unknown-default-previous.rsc",
         "不会主动探测业务可达性",
         "IPv6 不经过这些 IPv4",
+        "RouterOS 默认系统日志容量有限",
     ):
         if required not in readme:
             raise ValueError(f"README is missing Mobile-default guidance: {required}")

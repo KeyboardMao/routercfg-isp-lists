@@ -18,7 +18,7 @@
     }
     :local numericVersion [:pick $routerVersion 0 $channelStart]
     :local versionChannel [:pick $routerVersion ($channelStart + 1) [:len $routerVersion]]
-    :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+$") = false) do={
+    :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+\$") = false) do={
         :error ("routercfg unknown-default-Mobile: malformed RouterOS version: " . $routerVersion)
     }
     :if (($versionChannel != "(stable)") && ($versionChannel != "(long-term)")) do={

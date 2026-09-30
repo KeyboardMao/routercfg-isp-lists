@@ -29,7 +29,7 @@
     }
     :local numericVersion [:pick $routerVersion 0 $channelStart]
     :local versionChannel [:pick $routerVersion ($channelStart + 1) [:len $routerVersion]]
-    :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+$") = false) do={
+    :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+\$") = false) do={
         :error ("routercfg ISP updater: malformed RouterOS version: " . $routerVersion)
     }
     :if (($versionChannel != "(stable)") && ($versionChannel != "(long-term)")) do={
@@ -137,7 +137,7 @@
         }
         :local numericVersion [:pick $routerVersion 0 $channelStart]
         :local versionChannel [:pick $routerVersion ($channelStart + 1) [:len $routerVersion]]
-        :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+$") = false) do={
+        :if (($numericVersion ~ "^[0-9]+\\.[0-9]+\\.[0-9]+\$") = false) do={
             :error ("routercfg ISP updater: malformed RouterOS version: " . $routerVersion)
         }
         :if (($versionChannel != "(stable)") && ($versionChannel != "(long-term)")) do={
@@ -222,7 +222,7 @@
         :if ([:tonum ($releaseManifest->"schema_version")] != 1) do={ :error "ISP list updater: manifest version mismatch" }
         :local releaseToken [:tostr ($releaseManifest->"version")]
         :local releaseMarker [:tostr ($releaseManifest->"marker")]
-        :if (([:len $releaseToken] != 16) || (($releaseToken ~ "^[0-9a-f]+$") = false) || \
+        :if (([:len $releaseToken] != 16) || (($releaseToken ~ "^[0-9a-f]+\$") = false) || \
             ($releaseMarker != ("routercfg-auto:" . $releaseToken))) do={
             :error "ISP list updater: manifest release identity is invalid"
         }

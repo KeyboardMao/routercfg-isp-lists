@@ -55,6 +55,16 @@ class RouterOSVariablePolicyTests(unittest.TestCase):
             validate_bundle.routeros_reserved_variable_conflicts(script), []
         )
 
+    def test_rejects_unescaped_routeros_regex_end_anchor(self) -> None:
+        bad = r':if (($value ~ "^[0-9]+$") = false) do={}'
+        good = r':if (($value ~ "^[0-9]+\$") = false) do={}'
+        self.assertTrue(
+            validate_bundle.has_unescaped_routeros_regex_end_anchor(bad)
+        )
+        self.assertFalse(
+            validate_bundle.has_unescaped_routeros_regex_end_anchor(good)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

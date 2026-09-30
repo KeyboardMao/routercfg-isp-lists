@@ -40,6 +40,9 @@ ROUTEROS_RESERVED_PROPERTY_NAMES = {
 ROUTEROS_VARIABLE_DECLARATION_RE = re.compile(
     r":(?:local|global|for|foreach|onerror)\s+([A-Za-z][A-Za-z0-9]*)"
 )
+ROUTEROS_UNESCAPED_REGEX_END_RE = re.compile(
+    r'~\s*"[^"\r\n]*(?<!\\)\$"'
+)
 
 
 def routeros_version_supported(value: str) -> bool:
@@ -59,6 +62,11 @@ def routeros_reserved_variable_conflicts(script_text: str) -> list[str]:
     """Return reserved names used by every RouterOS variable declaration form."""
     declared_names = set(ROUTEROS_VARIABLE_DECLARATION_RE.findall(script_text))
     return sorted(declared_names & ROUTEROS_RESERVED_PROPERTY_NAMES)
+
+
+def has_unescaped_routeros_regex_end_anchor(script_text: str) -> bool:
+    """Detect a regex end anchor that RouterOS would parse as interpolation."""
+    return ROUTEROS_UNESCAPED_REGEX_END_RE.search(script_text) is not None
 
 
 def check_balanced_routeros(path: Path) -> None:
@@ -211,6 +219,10 @@ def validate_templates() -> None:
             raise ValueError(
                 f"{script_name} uses reserved RouterOS property names as variables: {conflicts}"
             )
+        if has_unescaped_routeros_regex_end_anchor(script_text):
+            raise ValueError(
+                f"{script_name} contains an unescaped RouterOS regex end anchor"
+            )
     for script_name, script_text in (
         ("Mobile-default switch", mobile_switch),
         ("Mobile-default restore", mobile_restore),
@@ -228,7 +240,7 @@ def validate_templates() -> None:
             ":local supportedMajor 7",
             '"(stable)"',
             '"(long-term)"',
-            '"^[0-9]+\\\\.[0-9]+\\\\.[0-9]+$"',
+            r'"^[0-9]+\\.[0-9]+\\.[0-9]+\$"',
             "($routerMajor != $supportedMajor)",
             "($routerMinor < 24)",
             "($routerPatch < 4)",

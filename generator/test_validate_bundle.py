@@ -31,5 +31,30 @@ class RouterOSVersionPolicyTests(unittest.TestCase):
                 self.assertFalse(validate_bundle.routeros_version_supported(value))
 
 
+class RouterOSVariablePolicyTests(unittest.TestCase):
+    def test_scans_all_declaration_forms_and_semicolon_declarations(self) -> None:
+        script = (
+            ":local safeName 1; :local mode 2\n"
+            ":global version 3\n"
+            ":for n from=0 to=1 do={}\n"
+            ":foreach ruleId in={} do={}\n"
+            ":onerror script in={} do={}\n"
+        )
+        self.assertEqual(
+            validate_bundle.routeros_reserved_variable_conflicts(script),
+            ["mode", "n", "script", "version"],
+        )
+
+    def test_allows_project_specific_names(self) -> None:
+        script = (
+            ":local restoreMode 1; :local releaseToken 2\n"
+            ":foreach bucketIndex in={} do={}\n"
+            ":onerror updaterError in={} do={}\n"
+        )
+        self.assertEqual(
+            validate_bundle.routeros_reserved_variable_conflicts(script), []
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

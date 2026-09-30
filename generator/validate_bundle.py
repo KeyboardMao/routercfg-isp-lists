@@ -17,6 +17,29 @@ SUPPORTED_ROUTEROS_CHANNELS = {"stable", "long-term"}
 ROUTEROS_VERSION_RE = re.compile(
     r"^([0-9]+)\.([0-9]+)\.([0-9]+) \((stable|long-term)\)$"
 )
+ROUTEROS_RESERVED_PROPERTY_NAMES = {
+    "action",
+    "address",
+    "chain",
+    "comment",
+    "disabled",
+    "distance",
+    "gateway",
+    "interface",
+    "mode",
+    "n",
+    "name",
+    "position",
+    "protocol",
+    "scheduler",
+    "schema",
+    "script",
+    "type",
+    "version",
+}
+ROUTEROS_VARIABLE_DECLARATION_RE = re.compile(
+    r":(?:local|global|for|foreach|onerror)\s+([A-Za-z][A-Za-z0-9]*)"
+)
 
 
 def routeros_version_supported(value: str) -> bool:
@@ -30,6 +53,12 @@ def routeros_version_supported(value: str) -> bool:
         and (major, minor, patch) >= MINIMUM_ROUTEROS_VERSION
         and channel in SUPPORTED_ROUTEROS_CHANNELS
     )
+
+
+def routeros_reserved_variable_conflicts(script_text: str) -> list[str]:
+    """Return reserved names used by every RouterOS variable declaration form."""
+    declared_names = set(ROUTEROS_VARIABLE_DECLARATION_RE.findall(script_text))
+    return sorted(declared_names & ROUTEROS_RESERVED_PROPERTY_NAMES)
 
 
 def check_balanced_routeros(path: Path) -> None:
@@ -173,38 +202,14 @@ def validate_templates() -> None:
             raise ValueError(f"Mobile-default restore is missing guard: {required}")
     if "/ip firewall mangle remove" in mobile_restore:
         raise ValueError("Mobile-default restore must not remove mangle rules")
-    reserved_local_names = {
-        "action",
-        "address",
-        "chain",
-        "comment",
-        "disabled",
-        "distance",
-        "gateway",
-        "interface",
-        "mode",
-        "n",
-        "name",
-        "position",
-        "protocol",
-        "scheduler",
-        "schema",
-        "script",
-        "type",
-        "version",
-    }
     managed_script_texts = [
         (path.name, path.read_text(encoding="ascii")) for path in files
     ]
     for script_name, script_text in managed_script_texts:
-        local_names = set(re.findall(r"(?m)^\s*:local\s+([A-Za-z][A-Za-z0-9]*)", script_text))
-        loop_names = set(
-            re.findall(r"(?m)^\s*:(?:for|foreach)\s+([A-Za-z][A-Za-z0-9]*)", script_text)
-        )
-        conflicts = sorted((local_names | loop_names) & reserved_local_names)
+        conflicts = routeros_reserved_variable_conflicts(script_text)
         if conflicts:
             raise ValueError(
-                f"{script_name} uses reserved RouterOS property names as locals: {conflicts}"
+                f"{script_name} uses reserved RouterOS property names as variables: {conflicts}"
             )
     for script_name, script_text in (
         ("Mobile-default switch", mobile_switch),
